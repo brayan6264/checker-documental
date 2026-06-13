@@ -6,6 +6,10 @@ se leen aquí desde variables de entorno, con valores por defecto sensatos.
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()  # carga .env si existe, sin pisar variables ya definidas en el entorno
+
 # Directorio raíz del proyecto (un nivel arriba de este archivo)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -25,7 +29,15 @@ CHUNK_SIZE           = 4 * 1024 * 1024   # 4 MB
 CHECKLIST_LOTE_GUARDADO = int(os.getenv("CHECKLIST_LOTE_GUARDADO", "50"))
 TIMEOUT_DESCARGA        = int(os.getenv("TIMEOUT_DESCARGA", "300"))
 
-# ── Análisis IA ───────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-IA_MODEL          = os.getenv("IA_MODEL", "claude-haiku-4-5-20251001")
-IA_HABILITADO     = os.getenv("IA_HABILITADO", "false").lower() == "true"
+# ── Análisis IA (OpenAI) ──────────────────────────────────────────────────────
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# gpt-4o: mejor comprensión visual de documentos escaneados con escritura manuscrita.
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
+IA_HABILITADO  = os.getenv("IA_HABILITADO", "false").lower() == "true"
+
+# Páginas máximas a enviar a la IA por documento (primeras N/2 + últimas N/2).
+IA_MAX_PAGINAS_COMPROMISO  = int(os.getenv("IA_MAX_PAGINAS_COMPROMISO",  "10"))
+IA_MAX_PAGINAS_VISITA      = int(os.getenv("IA_MAX_PAGINAS_VISITA",      "15"))
+IA_MAX_PAGINAS_TRATAMIENTO = int(os.getenv("IA_MAX_PAGINAS_TRATAMIENTO", "10"))
+IA_DPI     = int(os.getenv("IA_DPI",     "200"))
+IA_TIMEOUT = int(os.getenv("IA_TIMEOUT", "120"))

@@ -16,10 +16,15 @@ from fastapi import FastAPI
 from app.api import descarga, validacion
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# httpx y openai loguean los cuerpos completos de las peticiones (base64 de
+# imágenes) en DEBUG, lo que bloquea la consola de Windows con MB de datos.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
 
 app = FastAPI(
     title="Validador Documental SharePoint",
