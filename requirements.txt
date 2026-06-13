@@ -1,3 +1,6 @@
+# ── Variables de entorno ──────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+
 # ── Servidor web ──────────────────────────────────────────────────────────────
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
@@ -11,9 +14,6 @@ openpyxl>=3.1.2
 requests>=2.31.0
 urllib3>=2.0.0
 
-# ── Análisis IA (opcional) ────────────────────────────────────────────────────
-# Descomentar según las fases que se activen:
-# anthropic>=0.30.0         # cliente oficial Anthropic (LLM)
-# pymupdf>=1.24.0           # extracción de texto de PDFs  (pip install pymupdf)
-# pillow>=10.0.0            # manejo de imágenes
-# python-docx>=1.1.0        # extracción de texto de DOCX
+# ── Análisis IA ───────────────────────────────────────────────────────────────
+openai>=1.30.0         # GPT-4o-mini con visión (requiere IA_HABILITADO=true)
+pymupdf>=1.24.0        # Conversión PDF → imágenes para análisis visual

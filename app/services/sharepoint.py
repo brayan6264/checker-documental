@@ -109,31 +109,48 @@ def _listar_carpeta(
     return carpetas, archivos
 
 
-def _buscar_carpeta_doc_en_sharepoint(
-    sess: requests.Session, host: str, web: str, rel_raiz: str
+def _buscar_subcarpeta(
+    sess: requests.Session, host: str, web: str, rel_raiz: str,
+    criterio,   # callable(nombre_normalizado: str) -> bool
 ) -> str | None:
     """
-    Busca recursivamente en SharePoint (sin descargar nada) la subcarpeta
-    cuyo nombre normalizado contenga '00' Y 'documentacion'.
-    Retorna la ServerRelativeUrl de esa carpeta, o None si no existe.
+    BFS en SharePoint (sin descargar) buscando una subcarpeta que cumpla el criterio.
+    Retorna la ServerRelativeUrl de la primera coincidencia, o None.
     """
     pendientes = [rel_raiz]
     while pendientes:
-        actual    = pendientes.pop(0)
+        actual = pendientes.pop(0)
         try:
             carpetas, _ = _listar_carpeta(sess, host, web, actual)
         except Exception as exc:
             logger.warning("Error listando '%s': %s", actual, exc)
             continue
-
         for rel_sub in carpetas:
-            nombre = rel_sub.rstrip("/").split("/")[-1]
-            n      = normalizar(nombre)
-            if "00" in n and "documentacion" in n:
+            nombre = normalizar(rel_sub.rstrip("/").split("/")[-1])
+            if criterio(nombre):
                 return rel_sub
             pendientes.append(rel_sub)
-
     return None
+
+
+def _buscar_carpeta_doc_en_sharepoint(
+    sess: requests.Session, host: str, web: str, rel_raiz: str
+) -> str | None:
+    """Localiza la subcarpeta 00_DOCUMENTACION (nombre contiene '00' y 'documentacion')."""
+    return _buscar_subcarpeta(
+        sess, host, web, rel_raiz,
+        lambda n: "00" in n and "documentacion" in n,
+    )
+
+
+def _buscar_carpeta_visita_en_sharepoint(
+    sess: requests.Session, host: str, web: str, rel_raiz: str
+) -> str | None:
+    """Localiza la subcarpeta 01_VISITA (nombre contiene '01' y 'visita' o 'caracterizacion')."""
+    return _buscar_subcarpeta(
+        sess, host, web, rel_raiz,
+        lambda n: "01" in n and ("visita" in n or "caracterizacion" in n),
+    )
 
 
 def _listar_arbol(
@@ -275,6 +292,91 @@ def descargar_carpeta_doc(url: str, dest_base: Path | None = None) -> tuple[Path
 
     stats = _descargar_arbol(sess, host, web, rel_doc, ruta_local)
     return ruta_local, stats
+
+
+def descargar_visita_selectiva(
+    url: str, dest_base: Path
+) -> dict:
+    """
+    Procesa la carpeta 01_VISITA_1_CARACTERIZACION de forma selectiva:
+      1. Localiza la subcarpeta 01_VISITA en SharePoint.
+      2. Lista su contenido (un solo nivel + recursivo para archivos).
+      3. Cuenta archivos de tipo imagen/video SIN descargarlos.
+      4. Descarga SOLO los 3 documentos obligatorios (compromiso, visita, tratamiento).
+
+    Retorna un dict con:
+      encontrada       → bool
+      conteo_media     → int (cantidad de fotos/videos)
+      docs_rutas       → {keyword: Path | None}  rutas locales de los 3 docs
+      stats            → {total_descargados, exitosos, fallidos}
+    """
+    from app.core.normalizacion import normalizar as _norm
+    from app.core.reglas import EXTENSIONES_MEDIA, PALABRAS_CLAVE_VISITA
+
+    resultado = {
+        "encontrada":   False,
+        "conteo_media": 0,
+        "docs_rutas":   {k: None for k in PALABRAS_CLAVE_VISITA},
+        "stats":        {"total": 0, "exitosos": 0, "fallidos": 0},
+    }
+
+    sess            = _nueva_sesion()
+    host, web, rel  = resolver(sess, url)
+
+    rel_visita = _buscar_carpeta_visita_en_sharepoint(sess, host, web, rel)
+    if rel_visita is None:
+        return resultado
+
+    resultado["encontrada"] = True
+
+    # Listar todos los archivos de la carpeta (recursivo BFS)
+    todos_archivos = _listar_arbol(sess, host, web, rel_visita)
+
+    conteo_media   = 0
+    a_descargar    = {}  # {keyword: srel}
+
+    for srel in todos_archivos:
+        nombre = srel.rstrip("/").split("/")[-1]
+        ext    = Path(nombre).suffix.lower()
+        stem   = _norm(Path(nombre).stem)
+
+        # Contar media (sin descargar)
+        if ext in EXTENSIONES_MEDIA:
+            conteo_media += 1
+            continue
+
+        # Identificar los 3 documentos obligatorios
+        for keyword, palabras in PALABRAS_CLAVE_VISITA.items():
+            if keyword not in a_descargar and any(p in stem for p in palabras):
+                a_descargar[keyword] = srel
+                break
+
+    resultado["conteo_media"] = conteo_media
+
+    if not a_descargar:
+        return resultado
+
+    # Descargar solo los documentos identificados
+    dest_base.mkdir(parents=True, exist_ok=True)
+    exitosos = 0
+    fallidos  = 0
+
+    for keyword, srel in a_descargar.items():
+        nombre_archivo = srel.rstrip("/").split("/")[-1]
+        destino        = dest_base / nombre_archivo
+        size           = _bajar_archivo(sess, host, srel, destino)
+        if size >= 0:
+            resultado["docs_rutas"][keyword] = destino
+            exitosos += 1
+        else:
+            fallidos += 1
+
+    resultado["stats"] = {
+        "total":     len(a_descargar),
+        "exitosos":  exitosos,
+        "fallidos":  fallidos,
+    }
+    return resultado
 
 
 def descargar_carpeta(url: str, dest_base: Path | None = None) -> tuple[Path, dict]:

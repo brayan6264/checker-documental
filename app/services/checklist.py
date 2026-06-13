@@ -1,11 +1,14 @@
 """
 Escritura incremental del checklist de validación documental en formato Excel.
 
-Características:
-- Si el archivo ya existe, lo carga y extrae los ID_unico ya procesados (reanudable).
-- Cada llamada a agregar_fila() acumula en memoria y persiste cada `lote_guardado` filas.
-- Aplica el formato visual especificado: Arial 9, centrado, encabezado lila,
-  celdas rojas para documentos obligatorios ausentes.
+Columnas:
+  Identificación : ID_unico, modalidad, unidad_doc, integrante
+  Carpeta 00     : CEDULA, COMERCIO, RUT, TENENCIA
+  Carpeta 01     : 01_DOCUMENTOS, 01_FOTOS_VIDEOS, 01_REVISION_IA
+  General        : observaciones
+
+Color rojo  : documentos obligatorios ausentes (00) o faltantes en 01.
+Color amarillo: alertas de la revisión IA en documentos de 01.
 """
 
 import os
@@ -17,57 +20,87 @@ from openpyxl.utils import get_column_letter
 
 from app.core.reglas import Estado
 
-# ── Paleta de colores (ARGB: FF = opaco) ─────────────────────────────────────
-_LILA  = "FFCC8FCC"
-_ROJO  = "FFFF6B6B"
-_BLANC = "FFFFFFFF"
+# ── Paleta de colores (ARGB) ──────────────────────────────────────────────────
+_LILA     = "FFCC8FCC"
+_AZUL_OSC = "FF2E4A7A"   # encabezado de grupo (carpeta)
+_AZUL_MED = "FF4472C4"   # encabezado Identificación
+_VERDE    = "FF375623"   # encabezado 01 Visita
+_NARANJA  = "FF833C00"   # encabezado 00 Documentación
+_GRIS     = "FF595959"   # encabezado General
+_ROJO     = "FFFF6B6B"
+_AMARILLO = "FFFFF59D"
+_BLANC    = "FFFFFFFF"
+_NEGRO    = "FF000000"
 
-FILL_LILA = PatternFill(start_color=_LILA, end_color=_LILA, fill_type="solid")
-FILL_ROJO = PatternFill(start_color=_ROJO, end_color=_ROJO, fill_type="solid")
+FILL_LILA     = PatternFill(start_color=_LILA,     end_color=_LILA,     fill_type="solid")
+FILL_ROJO     = PatternFill(start_color=_ROJO,     end_color=_ROJO,     fill_type="solid")
+FILL_AMARILLO = PatternFill(start_color=_AMARILLO, end_color=_AMARILLO, fill_type="solid")
 
-FONT_HEADER = Font(name="Arial", size=9, bold=True, color=_BLANC)
-FONT_NORMAL = Font(name="Arial", size=9)
-FONT_FALTA  = Font(name="Arial", size=9, bold=True, color=_BLANC)
+FONT_HEADER       = Font(name="Arial", size=9,  bold=True,  color=_BLANC)
+FONT_GRUPO        = Font(name="Arial", size=10, bold=True,  color=_BLANC)
+FONT_NORMAL       = Font(name="Arial", size=9)
+FONT_FALTA        = Font(name="Arial", size=9,  bold=True,  color=_BLANC)
+FONT_IA_WARN      = Font(name="Arial", size=9,  bold=False, color=_NEGRO)
 
 ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-# ── Estructura de columnas ────────────────────────────────────────────────────
+# ── Columnas ──────────────────────────────────────────────────────────────────
 
 COLUMNAS = [
-    "ID_unico",
-    "modalidad",
-    "unidad_doc",
-    "integrante",
-    "CEDULA",
-    "COMERCIO",
-    "RUT",
-    "TENENCIA",
+    # Identificación
+    "ID_unico", "modalidad", "unidad_doc",
+    # Carpeta 00_DOCUMENTACION
+    "CEDULA", "COMERCIO", "RUT", "TENENCIA",
+    # Carpeta 01_VISITA_1_CARACTERIZACION
+    "01_DOCUMENTOS",     # existencia de los 3 documentos
+    "01_FOTOS_VIDEOS",   # conteo de archivos multimedia
+    "ACTA_COMPROMISO",   # revisión del acta de compromiso
+    "ACTA_VISITA",       # revisión del acta de visita
+    "GESTOR",            # gestor extraído del acta de visita y verificado en BD
+    "TRATAMIENTO_DATOS", # revisión de autorización de tratamiento de datos
+    # General
     "observaciones",
 ]
 
 _ANCHOS_MIN = {
-    "ID_unico":      20,
-    "modalidad":     12,
-    "unidad_doc":    22,
-    "integrante":    32,
-    "CEDULA":        20,
-    "COMERCIO":      20,
-    "RUT":           20,
-    "TENENCIA":      20,
-    "observaciones": 42,
+    "ID_unico":          18, "modalidad":       10, "unidad_doc":      22,
+    "CEDULA":            18, "COMERCIO":        18, "RUT":             14,
+    "TENENCIA":          18,
+    "01_DOCUMENTOS":     38, "01_FOTOS_VIDEOS": 22,
+    "ACTA_COMPROMISO":   35, "ACTA_VISITA":     35,
+    "GESTOR":            40, "TRATAMIENTO_DATOS": 35,
+    "observaciones":     50,
 }
 
-_DOC_COL_IDX = {
+_COLS_00_IDX = {
     doc: COLUMNAS.index(doc) + 1
     for doc in ("CEDULA", "COMERCIO", "RUT", "TENENCIA")
 }
+
+_COL_DOCS_IDX  = COLUMNAS.index("01_DOCUMENTOS")   + 1
+_COL_FOTOS_IDX = COLUMNAS.index("01_FOTOS_VIDEOS") + 1
+_COL_GESTOR_IDX = COLUMNAS.index("GESTOR")         + 1
+_COLS_DOC_REV_IDX = {
+    col: COLUMNAS.index(col) + 1
+    for col in ("ACTA_COMPROMISO", "ACTA_VISITA", "GESTOR", "TRATAMIENTO_DATOS")
+}
+
+# Orden y color de cada grupo-carpeta para la fila de encabezado superior
+_GRUPOS_ORDEN = [
+    ("Identificación",   ["ID_unico", "modalidad", "unidad_doc"],                 _AZUL_MED),
+    ("00 Documentación", ["CEDULA", "COMERCIO", "RUT", "TENENCIA"],               _NARANJA),
+    ("01 Visita",        ["01_DOCUMENTOS", "01_FOTOS_VIDEOS",
+                          "ACTA_COMPROMISO", "ACTA_VISITA", "GESTOR",
+                          "TRATAMIENTO_DATOS"],                                    _VERDE),
+    ("General",          ["observaciones"],                                        _GRIS),
+]
 
 
 class ChecklistWriter:
     """Mantiene y escribe el archivo Excel del checklist de validación."""
 
     def __init__(self, ruta: str, lote_guardado: int = 50):
-        self.ruta         = ruta
+        self.ruta          = ruta
         self.lote_guardado = lote_guardado
         self._sin_guardar  = 0
         self._max_ancho    = [_ANCHOS_MIN[c] for c in COLUMNAS]
@@ -87,18 +120,25 @@ class ChecklistWriter:
         return self._ids_procesados
 
     def agregar_fila(self, resultado: dict) -> None:
-        """Agrega una fila y aplica formato. Persiste cada `lote_guardado` filas."""
         docs_estado: Dict[str, Estado] = resultado.get("docs_estado_raw", {})
 
         valores = [
-            resultado.get("ID_unico",     ""),
-            resultado.get("modalidad",    ""),
-            resultado.get("unidad_doc",   ""),
-            resultado.get("integrante",   ""),
+            resultado.get("ID_unico",      ""),
+            resultado.get("modalidad",     ""),
+            resultado.get("unidad_doc",    ""),
+            # 00
             resultado.get("docs", {}).get("CEDULA",   ""),
             resultado.get("docs", {}).get("COMERCIO", ""),
             resultado.get("docs", {}).get("RUT",      ""),
             resultado.get("docs", {}).get("TENENCIA", ""),
+            # 01
+            resultado.get("01_documentos",      "N/A"),
+            resultado.get("01_fotos_videos",    "N/A"),
+            resultado.get("01_acta_compromiso", "N/A"),
+            resultado.get("01_acta_visita",     "N/A"),
+            resultado.get("01_gestor",          "N/A"),
+            resultado.get("01_tratamiento",     "N/A"),
+            # General
             resultado.get("observaciones", ""),
         ]
 
@@ -110,12 +150,43 @@ class ChecklistWriter:
             celda.font      = FONT_NORMAL
             celda.alignment = ALIGN_CENTER
 
-        for doc, col_idx in _DOC_COL_IDX.items():
+        # Rojo en docs 00 ausentes
+        for doc, col_idx in _COLS_00_IDX.items():
             if docs_estado.get(doc) == Estado.FALTA:
-                celda       = self._ws.cell(row=fila_num, column=col_idx)
-                celda.fill  = FILL_ROJO
-                celda.font  = FONT_FALTA
+                celda      = self._ws.cell(row=fila_num, column=col_idx)
+                celda.fill = FILL_ROJO
+                celda.font = FONT_FALTA
 
+        # Rojo en 01_DOCUMENTOS si hay alguno faltante
+        val_docs = str(valores[COLUMNAS.index("01_DOCUMENTOS")])
+        if "FALTA" in val_docs.upper():
+            celda      = self._ws.cell(row=fila_num, column=_COL_DOCS_IDX)
+            celda.fill = FILL_ROJO
+            celda.font = FONT_FALTA
+
+        # Rojo en 01_FOTOS_VIDEOS si insuficientes
+        val_fotos = str(valores[COLUMNAS.index("01_FOTOS_VIDEOS")])
+        if "FALTA" in val_fotos.upper():
+            celda      = self._ws.cell(row=fila_num, column=_COL_FOTOS_IDX)
+            celda.fill = FILL_ROJO
+            celda.font = FONT_FALTA
+
+        # Rojo en GESTOR si no está registrado en BD
+        val_gestor = str(valores[COLUMNAS.index("GESTOR")])
+        if "NO REGISTRADO" in val_gestor.upper():
+            celda      = self._ws.cell(row=fila_num, column=_COL_GESTOR_IDX)
+            celda.fill = FILL_ROJO
+            celda.font = FONT_FALTA
+
+        # Amarillo en cada columna de revisión si tiene alerta
+        alertas_por_col = resultado.get("01_alertas_por_doc", {})
+        for col_nombre, col_idx in _COLS_DOC_REV_IDX.items():
+            if alertas_por_col.get(col_nombre, False):
+                celda      = self._ws.cell(row=fila_num, column=col_idx)
+                celda.fill = FILL_AMARILLO
+                celda.font = FONT_IA_WARN
+
+        # Auto-fit
         for i, valor in enumerate(valores):
             longitud = len(str(valor)) if valor else 0
             if longitud + 3 > self._max_ancho[i]:
@@ -128,24 +199,61 @@ class ChecklistWriter:
             self.guardar()
 
     def guardar(self) -> None:
-        """Persiste a disco. Aplica auto-fit de columnas antes de escribir."""
         self._ajustar_anchos()
         self._wb.save(self.ruta)
         self._sin_guardar = 0
 
     def _escribir_encabezado(self) -> None:
+        from openpyxl.styles import Border, Side
+        borde_blanco = Border(
+            left=Side(style="thin", color=_BLANC),
+            right=Side(style="thin", color=_BLANC),
+        )
+
+        # ── Fila 1: encabezados de grupo (carpeta) ────────────────────────────
+        col_cursor = 1
+        for nombre_grupo, cols_grupo, color_hex in _GRUPOS_ORDEN:
+            ancho  = len(cols_grupo)
+            fill   = PatternFill(start_color=color_hex, end_color=color_hex, fill_type="solid")
+            inicio = col_cursor
+            fin    = col_cursor + ancho - 1
+
+            # Celda principal con el texto
+            celda           = self._ws.cell(row=1, column=inicio)
+            celda.value     = nombre_grupo
+            celda.fill      = fill
+            celda.font      = FONT_GRUPO
+            celda.alignment = ALIGN_CENTER
+            celda.border    = borde_blanco
+
+            # Rellenar celdas intermedias antes de combinar
+            for c in range(inicio + 1, fin + 1):
+                cx = self._ws.cell(row=1, column=c)
+                cx.fill   = fill
+                cx.border = borde_blanco
+
+            if ancho > 1:
+                self._ws.merge_cells(
+                    start_row=1, start_column=inicio,
+                    end_row=1,   end_column=fin,
+                )
+            col_cursor += ancho
+
+        self._ws.row_dimensions[1].height = 22
+
+        # ── Fila 2: nombres de columna ────────────────────────────────────────
         self._ws.append(COLUMNAS)
         for col_idx in range(1, len(COLUMNAS) + 1):
-            celda           = self._ws.cell(row=1, column=col_idx)
+            celda           = self._ws.cell(row=2, column=col_idx)
             celda.fill      = FILL_LILA
             celda.font      = FONT_HEADER
             celda.alignment = ALIGN_CENTER
-        self._ws.row_dimensions[1].height = 25
-        self._ws.freeze_panes = "A2"
+        self._ws.row_dimensions[2].height = 28
+        self._ws.freeze_panes = "A3"
 
     def _leer_ids_existentes(self) -> Set[str]:
         ids: Set[str] = set()
-        for fila in self._ws.iter_rows(min_row=2, values_only=True):
+        for fila in self._ws.iter_rows(min_row=3, values_only=True):
             if fila[0]:
                 ids.add(str(fila[0]))
         return ids
@@ -153,4 +261,4 @@ class ChecklistWriter:
     def _ajustar_anchos(self) -> None:
         for col_idx, ancho in enumerate(self._max_ancho, start=1):
             letra = get_column_letter(col_idx)
-            self._ws.column_dimensions[letra].width = min(ancho, 60)
+            self._ws.column_dimensions[letra].width = min(ancho, 65)

@@ -58,11 +58,32 @@ PALABRAS_CLAVE: Dict[str, list] = {
     "CEDULA":   ["cedula"],
     "COMERCIO": ["comercio"],
     "RUT":      ["rut"],
-    "TENENCIA": ["tenencia"],
+    "TENENCIA": ["tenencia", "existencia"],
 }
 
-# Orden canónico de columnas en el checklist.
+# Orden canónico de columnas en el checklist (carpeta 00).
 DOCUMENTOS_ORDEN = ["CEDULA", "COMERCIO", "RUT", "TENENCIA"]
+
+# ── Carpeta 01_VISITA_1_CARACTERIZACION ───────────────────────────────────────
+
+# Palabras clave para identificar los 3 documentos obligatorios de la visita.
+# Se comparan contra el stem normalizado del nombre de archivo.
+PALABRAS_CLAVE_VISITA: dict[str, list[str]] = {
+    "ACTA_COMPROMISO":   ["compromiso"],
+    "ACTA_VISITA_1":     ["visita"],
+    "TRATAMIENTO_DATOS": ["tratamiento", "autorizacion"],
+}
+
+DOCS_VISITA_ORDEN = ["ACTA_COMPROMISO", "ACTA_VISITA_1", "TRATAMIENTO_DATOS"]
+
+# Extensiones consideradas "media" (imagen o video).
+EXTENSIONES_MEDIA = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp",
+    ".heic", ".heif", ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv",
+    ".webm", ".3gp", ".m4v",
+}
+
+MIN_ARCHIVOS_MEDIA = 4  # mínimo 4 fotos o videos obligatorios
 
 
 # ── Lógica de evaluación ──────────────────────────────────────────────────────
