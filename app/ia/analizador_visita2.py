@@ -35,37 +35,33 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────────────
 
 CAMPOS_CONTROL = [
-    "Nombre Unidad Productiva",
-    "Nombre representante",
-    "Celular",
-    "Actividad económica principal",
-    "Necesidad o problema que atiende",
-    "Principales clientes",
-    "Clientes a los que quiere llegar",
-    "Acción de alianza",
-    "Fortaleza",
-    "Oportunidad",
-    "Debilidad",
-    "Amenaza",
-    "Objetivo del plan",
-    "Acción administrativa",
-    "Acción productiva",
-    "Tema asistencia técnica",
-    "Modalidad educativa",
-    "Pertenece a organización",
-    "Interés en participar",
+    "unidad productiva",
+    "representante",
+    "celular",
+    "actividad economica principal",
+    "necesidad o problema",
+    "principales clientes",
+    "otro tipo de clientes",
+    "fortalezas",
+    "oportunidades",
+    "debilidades",
+    "amenazas",
+    "plan de inversion",
+    "estrategias administrativas",
+    "fortalecimiento productivo",
+    "asistencia tecnica",
+    "modalidad educativa",
+    "organizacion y/o asociacion",
+    "asociacion, red o plataforma",
 ]
 
 
-def buscar_valor_derecha(ws, etiqueta):
+def buscar_valor_cercano(ws, etiqueta):
     """
-    Busca una etiqueta dentro de la hoja y retorna
-    el primer valor encontrado.
+    Busca una etiqueta y localiza una respuesta cercana.
 
-    Estrategia:
-    1. Buscar la etiqueta normalizada.
-    2. Buscar contenido a la derecha.
-    3. Si no existe, buscar contenido debajo.
+    Revisa un área alrededor de la etiqueta y evita
+    tomar otras etiquetas como respuesta.
     """
 
     etiqueta_norm = normalizar(etiqueta)
@@ -79,44 +75,52 @@ def buscar_valor_derecha(ws, etiqueta):
 
             texto = normalizar(str(celda.value))
 
-            if etiqueta_norm in texto:
+            if etiqueta_norm not in texto:
+                continue
 
-                fila_idx = celda.row
-                col_idx = celda.column
+            fila_idx = celda.row
+            col_idx = celda.column
 
-                # ── Buscar hacia la derecha ──────────────────────────────
+            candidatos = []
+
+            # Buscar en una ventana cercana
+            for r in range(fila_idx, fila_idx + 6):
+
                 for c in range(col_idx + 1, col_idx + 6):
 
                     valor = ws.cell(
-                        row=fila_idx,
+                        row=r,
                         column=c,
                     ).value
 
                     if valor is None:
                         continue
 
-                    if isinstance(valor, str) and not valor.strip():
-                        continue
+                    if isinstance(valor, str):
 
-                    return valor
+                        valor = valor.strip()
 
-                # ── Buscar hacia abajo ──────────────────────────────────
-                for r in range(fila_idx + 1, fila_idx + 4):
+                        if not valor:
+                            continue
 
-                    valor = ws.cell(
-                        row=r,
-                        column=col_idx,
-                    ).value
+                    candidatos.append(str(valor))
 
-                    if valor is None:
-                        continue
+            # Filtrar etiquetas conocidas
+            for candidato in candidatos:
 
-                    if isinstance(valor, str) and not valor.strip():
-                        continue
+                candidato_norm = normalizar(candidato)
 
-                    return valor
+                es_etiqueta = any(
+                    normalizar(campo) in candidato_norm
+                    for campo in CAMPOS_CONTROL
+                )
 
-                return None
+                if es_etiqueta:
+                    continue
+
+                return candidato
+
+            return None
 
     return None
 
@@ -136,13 +140,26 @@ def analizar_plan_negocio(ruta_excel: str) -> Dict[str, object]:
         ws = wb.worksheets[0]
 
         for etiqueta in CAMPOS_CONTROL:
-            valor = buscar_valor_derecha(
+
+            valor = buscar_valor_cercano(
                 ws,
                 etiqueta,
             )
+
             if valor is None:
+
+                print(
+                    f"NO ENCONTRADO -> {etiqueta}"
+                )
+
                 faltantes.append(
                     etiqueta
+                )
+
+            else:
+
+                print(
+                    f"{etiqueta} -> {valor}"
                 )
 
         wb.close()
@@ -269,3 +286,4 @@ Responde SOLO con este JSON:
         )
 
     return ResultadoAnalisis(ok=True)
+
