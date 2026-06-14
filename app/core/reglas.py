@@ -90,9 +90,9 @@ DOCS_VISITA_ORDEN = ["ACTA_COMPROMISO", "ACTA_VISITA_1", "TRATAMIENTO_DATOS"]
 # ── Carpeta 02_VISITA_2_DIAGNOSTICO ──────────────────────────────────────────
 
 PALABRAS_CLAVE_VISITA2: dict[str, list[str]] = {
-    "ACTA_VISITA_2": ["acta"],
-    "DIAGNOSTICO": ["diagnostico"],
+    "DIAGNOSTICO":  ["diag"],
     "PLAN_NEGOCIO": ["plan de negocio"],
+    "ACTA_VISITA_2": ["vis"],
 }
 
 DOCS_VISITA2_ORDEN = [

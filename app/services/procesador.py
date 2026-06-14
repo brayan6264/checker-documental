@@ -79,15 +79,21 @@ class ValidadorDocumental:
         v.procesar_matriz("matriz.xlsx")
     """
 
+    # Flujos válidos disponibles
+    FLUJOS_VALIDOS = {"00", "01", "02", "03"}
+
     def __init__(
         self,
         ruta_checklist: str,
         callback_progreso: Optional[Callable[[int, int, int], None]] = None,
         lote_guardado: int = CHECKLIST_LOTE_GUARDADO,
+        flujos: Optional[set] = None,
     ):
         self.ruta_checklist    = ruta_checklist
         self.callback_progreso = callback_progreso
         self.lote_guardado     = lote_guardado
+        # None → todos los flujos; set vacío → ninguno (no tiene sentido, se trata como todos)
+        self.flujos: set[str] = flujos if flujos else self.FLUJOS_VALIDOS
 
     # ── Punto de entrada principal ────────────────────────────────────────────
 
@@ -156,49 +162,67 @@ class ValidadorDocumental:
             return self._armar_resultado(
                 id_unico, modalidad, unidad_doc, integrante,
                 estados_por_defecto(modalidad), {}, {}, {}, observaciones, tiene_error=True,
+                flujos=self.flujos,
             )
+
+        _omitido = {"encontrada": False, "observaciones": [], "tiene_error": False}
 
         # ── 2. Carpeta 00_DOCUMENTACION ───────────────────────────────────────
         docs_estado = estados_por_defecto(modalidad)
-        ruta_doc: Optional[Path] = None
-        try:
-            logger.info("  [%s] Buscando 00_DOCUMENTACION...", id_unico)
-            ruta_doc, _ = descargar_carpeta_doc(link, dest_base / "doc")
-            if ruta_doc is None:
-                observaciones.append("00_DOCUMENTACION no encontrada en SharePoint")
-                tiene_error = True
-            else:
-                archivos   = self._listar_archivos(str(ruta_doc))
-                rutas_docs = self._detectar_documentos(archivos)
-                self._aplicar_regla_unidad_doc(rutas_docs, archivos, unidad_doc, modalidad)
-                presentes   = {doc: (r is not None) for doc, r in rutas_docs.items()}
-                docs_estado = evaluar_documentos(modalidad, presentes)
-                faltantes   = [d for d, e in docs_estado.items() if e == Estado.FALTA]
-                if faltantes:
-                    observaciones.append(f"00 — Obligatorios ausentes: {', '.join(faltantes)}")
+        if "00" in self.flujos:
+            ruta_doc: Optional[Path] = None
+            try:
+                logger.info("  [%s] Buscando 00_DOCUMENTACION...", id_unico)
+                ruta_doc, _ = descargar_carpeta_doc(link, dest_base / "doc")
+                if ruta_doc is None:
+                    observaciones.append("00_DOCUMENTACION no encontrada en SharePoint")
                     tiene_error = True
-                logger.info("  [%s] 00 OK — detectados: %s", id_unico, presentes)
-        except Exception as exc:
-            observaciones.append(f"00 — Descarga fallida: {exc}")
-            tiene_error = True
+                else:
+                    archivos   = self._listar_archivos(str(ruta_doc))
+                    rutas_docs = self._detectar_documentos(archivos)
+                    self._aplicar_regla_unidad_doc(rutas_docs, archivos, unidad_doc, modalidad)
+                    presentes   = {doc: (r is not None) for doc, r in rutas_docs.items()}
+                    docs_estado = evaluar_documentos(modalidad, presentes)
+                    faltantes   = [d for d, e in docs_estado.items() if e == Estado.FALTA]
+                    if faltantes:
+                        observaciones.append(f"00 — Obligatorios ausentes: {', '.join(faltantes)}")
+                        tiene_error = True
+                    logger.info("  [%s] 00 OK — detectados: %s", id_unico, presentes)
+            except Exception as exc:
+                observaciones.append(f"00 — Descarga fallida: {exc}")
+                tiene_error = True
+        else:
+            logger.info("  [%s] 00 omitido (no incluido en flujos)", id_unico)
 
         # ── 3. Carpeta 01_VISITA_1_CARACTERIZACION ────────────────────────────
-        resultado_visita = self._procesar_visita(id_unico, link, dest_base / "visita")
-        observaciones.extend(resultado_visita["observaciones"])
-        if resultado_visita["tiene_error"]:
-            tiene_error = True
+        if "01" in self.flujos:
+            resultado_visita = self._procesar_visita(id_unico, link, dest_base / "visita")
+            observaciones.extend(resultado_visita["observaciones"])
+            if resultado_visita["tiene_error"]:
+                tiene_error = True
+        else:
+            resultado_visita = _omitido
+            logger.info("  [%s] 01 omitido (no incluido en flujos)", id_unico)
 
         # ── 4. Carpeta 02_VISITA_2_DIAGNOSTICO ───────────────────────────────
-        resultado_visita2 = self._procesar_visita2(id_unico, link, dest_base / "visita2")
-        observaciones.extend(resultado_visita2["observaciones"])
-        if resultado_visita2["tiene_error"]:
-            tiene_error = True
+        if "02" in self.flujos:
+            resultado_visita2 = self._procesar_visita2(id_unico, link, dest_base / "visita2")
+            observaciones.extend(resultado_visita2["observaciones"])
+            if resultado_visita2["tiene_error"]:
+                tiene_error = True
+        else:
+            resultado_visita2 = _omitido
+            logger.info("  [%s] 02 omitido (no incluido en flujos)", id_unico)
 
         # ── 5. Carpeta 03_* (capacitación) ────────────────────────────────────
-        resultado_03 = self._procesar_03(id_unico, modalidad, link, dest_base / "cap03")
-        observaciones.extend(resultado_03["observaciones"])
-        if resultado_03["tiene_error"]:
-            tiene_error = True
+        if "03" in self.flujos:
+            resultado_03 = self._procesar_03(id_unico, modalidad, link, dest_base / "cap03")
+            observaciones.extend(resultado_03["observaciones"])
+            if resultado_03["tiene_error"]:
+                tiene_error = True
+        else:
+            resultado_03 = _omitido
+            logger.info("  [%s] 03 omitido (no incluido en flujos)", id_unico)
 
         # ── 6. Limpiar temporales ─────────────────────────────────────────────
         if dest_base.exists():
@@ -211,7 +235,7 @@ class ValidadorDocumental:
         return self._armar_resultado(
             id_unico, modalidad, unidad_doc, integrante,
             docs_estado, resultado_visita, resultado_visita2, resultado_03,
-            observaciones, tiene_error,
+            observaciones, tiene_error, self.flujos,
         )
 
     # ── Validación carpeta 01 ─────────────────────────────────────────────────
@@ -591,7 +615,11 @@ class ValidadorDocumental:
         resultado_03: dict,
         observaciones: list,
         tiene_error: bool,
+        flujos: Optional[set] = None,
     ) -> dict:
+        if flujos is None:
+            flujos = {"00", "01", "02", "03"}
+        _OMITIDO = "—"  # valor en Excel cuando el flujo no fue ejecutado
         ia = resultado_visita.get("ia", {})
         dv = resultado_visita.get("docs_visita", {k: "N/A" for k in DOCS_VISITA_ORDEN})
         cm = resultado_visita.get("conteo_media", 0)
@@ -605,7 +633,9 @@ class ValidadorDocumental:
             "ACTA_VISITA_1":     "VISITA",
             "TRATAMIENTO_DATOS": "TRATAMIENTO",
         }
-        if not encontrada:
+        if "01" not in flujos:
+            docs_01_valor = _OMITIDO
+        elif not encontrada:
             docs_01_valor = "N/A"
         else:
             faltantes = [_NOMBRE_CORTO[k] for k in DOCS_VISITA_ORDEN if dv.get(k) == "FALTA"]
@@ -619,7 +649,9 @@ class ValidadorDocumental:
                 docs_01_valor = f"OK ({', '.join(presentes)})"
 
         # ── 01_FOTOS_VIDEOS ───────────────────────────────────────────────────
-        if not encontrada:
+        if "01" not in flujos:
+            fotos_01_valor = _OMITIDO
+        elif not encontrada:
             fotos_01_valor = "N/A"
         elif cm >= MIN_ARCHIVOS_MEDIA:
             fotos_01_valor = f"OK ({cm} archivos)"
@@ -633,7 +665,9 @@ class ValidadorDocumental:
             "PLAN_NEGOCIO": "PLAN",
         }
 
-        if not encontrada2:
+        if "02" not in flujos:
+            docs_02_valor = _OMITIDO
+        elif not encontrada2:
             docs_02_valor = "N/A"
         else:
             faltantes = [
@@ -672,16 +706,23 @@ class ValidadorDocumental:
                 return "OK", False
             return res.alerta, True
 
-        val_compromiso,  alerta_compromiso  = _valor_revision("IA_COMPROMISO")
-        val_visita,      alerta_visita      = _valor_revision("IA_VISITA")
-        val_tratamiento, alerta_tratamiento = _valor_revision("IA_TRATAMIENTO")
+        if "01" not in flujos:
+            val_compromiso = val_visita = val_tratamiento = _OMITIDO
+            alerta_compromiso = alerta_visita = alerta_tratamiento = False
+        else:
+            val_compromiso,  alerta_compromiso  = _valor_revision("IA_COMPROMISO")
+            val_visita,      alerta_visita      = _valor_revision("IA_VISITA")
+            val_tratamiento, alerta_tratamiento = _valor_revision("IA_TRATAMIENTO")
 
         # ── Gestor ────────────────────────────────────────────────────────────
-        gn = resultado_visita.get("gestor_nombre", "")
-        gc = resultado_visita.get("gestor_cedula", "")
+        gn  = resultado_visita.get("gestor_nombre", "")
+        gc  = resultado_visita.get("gestor_cedula", "")
         gok = resultado_visita.get("gestor_ok", None)
 
-        if not encontrada or not IA_HABILITADO:
+        if "01" not in flujos:
+            gestor_valor  = _OMITIDO
+            alerta_gestor = False
+        elif not encontrada or not IA_HABILITADO:
             gestor_valor  = "N/A"
             alerta_gestor = False
         elif gok is None:
@@ -695,52 +736,37 @@ class ValidadorDocumental:
             alerta_gestor = True
 
         # ── Acta Visita 2 ─────────────────────────────────────────────────────
-        if not encontrada2:
+        if "02" not in flujos:
+            acta2_valor = _OMITIDO
+            alerta_acta2 = False
+        elif not encontrada2:
             acta2_valor = "N/A"
             alerta_acta2 = False
         else:
-            acta2_valor = resultado_visita2.get(
-                "acta_visita_2",
-                "No analizado",
-            )
+            acta2_valor = resultado_visita2.get("acta_visita_2", "N/A")
+            alerta_acta2 = acta2_valor not in ("N/A",) and "OK" not in str(acta2_valor)
 
-            if acta2_valor in ("N/A", "No analizado"):
-                alerta_acta2 = False
-            else:
-                alerta_acta2 = "OK" not in str(acta2_valor)
-            
         # ── Diagnóstico ──────────────────────────────────────────────────────
-        if not encontrada2:
-            diagnostico_valor = "N/A"
+        if "02" not in flujos:
+            diagnostico_valor  = _OMITIDO
             alerta_diagnostico = False
-
+        elif not encontrada2:
+            diagnostico_valor  = "N/A"
+            alerta_diagnostico = False
         else:
-            diagnostico_valor = resultado_visita2.get(
-                "diagnostico",
-                "No analizado",
-            )
-
-            if diagnostico_valor in ("N/A", "No analizado"):
-                alerta_diagnostico = False
-            else:
-                alerta_diagnostico = (
-                    "OK" not in str(diagnostico_valor)
-                )
+            diagnostico_valor  = resultado_visita2.get("diagnostico", "N/A")
+            alerta_diagnostico = diagnostico_valor != "N/A" and "OK" not in str(diagnostico_valor)
 
         # ── Plan de Negocio ───────────────────────────────────────────────────
-        if not encontrada2:
-            plan_valor = "N/A"
+        if "02" not in flujos:
+            plan_valor  = _OMITIDO
+            alerta_plan = False
+        elif not encontrada2:
+            plan_valor  = "N/A"
             alerta_plan = False
         else:
-            plan_valor = resultado_visita2.get(
-                "plan_negocio",
-                "No analizado",
-            )
-
-            if plan_valor in ("N/A", "No analizado"):
-                alerta_plan = False
-            else:
-                alerta_plan = "OK" not in str(plan_valor)
+            plan_valor  = resultado_visita2.get("plan_negocio", "N/A")
+            alerta_plan = plan_valor != "N/A" and "OK" not in str(plan_valor)
 
         return {
             "ID_unico":        id_unico,
@@ -748,8 +774,12 @@ class ValidadorDocumental:
             "unidad_doc":      unidad_doc,
             "integrante":      integrante,
             # Carpeta 00
-            "docs":            {doc: estado.value for doc, estado in docs_estado.items()},
-            "docs_estado_raw": docs_estado,
+            "docs": (
+                {doc: estado.value for doc, estado in docs_estado.items()}
+                if "00" in flujos
+                else {doc: _OMITIDO for doc in docs_estado}
+            ),
+            "docs_estado_raw": docs_estado if "00" in flujos else {},
             # Carpeta 01
             "01_documentos":      docs_01_valor,
             "01_fotos_videos":    fotos_01_valor,
@@ -774,12 +804,12 @@ class ValidadorDocumental:
                 "02_PLAN_NEGOCIO":  alerta_plan,
             },
             # Carpeta 03
-            "03_encuestas":    resultado_03.get("encuestas_valor",  "N/A"),
-            "03_grupal":       resultado_03.get("grupal_valor",     "N/A"),
-            "03_individual":   resultado_03.get("individual_valor", "N/A"),
-            "03_modulos":      resultado_03.get("modulos_valor",    "N/A"),
-            "03_asistencia":   resultado_03.get("asistencia_valor", "N/A"),
-            "03_alertas":      resultado_03.get("alertas", {}),
+            "03_encuestas":    resultado_03.get("encuestas_valor",  _OMITIDO) if "03" in flujos else _OMITIDO,
+            "03_grupal":       resultado_03.get("grupal_valor",     _OMITIDO) if "03" in flujos else _OMITIDO,
+            "03_individual":   resultado_03.get("individual_valor", _OMITIDO) if "03" in flujos else _OMITIDO,
+            "03_modulos":      resultado_03.get("modulos_valor",    _OMITIDO) if "03" in flujos else _OMITIDO,
+            "03_asistencia":   resultado_03.get("asistencia_valor", _OMITIDO) if "03" in flujos else _OMITIDO,
+            "03_alertas":      resultado_03.get("alertas", {}) if "03" in flujos else {},
             "observaciones":   "; ".join(observaciones),
             "_tiene_error":    tiene_error,
         }
