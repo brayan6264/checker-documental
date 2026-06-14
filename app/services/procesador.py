@@ -333,7 +333,7 @@ class ValidadorDocumental:
         obs: list[str] = []
         tiene_error = False
         docs_visita2 = {k: "FALTA" for k in DOCS_VISITA2_ORDEN}
-        acta_visita2 = diagnostico = plan_negocio = "No analizado"
+        acta_visita2 = diagnostico = plan_negocio = "N/A"
 
         try:
             logger.info("  [%s] Buscando 02_VISITA...", id_unico)
@@ -667,7 +667,7 @@ class ValidadorDocumental:
                 return "N/A", False
             res = ia.get(ia_key, _NO_ANALIZADO)
             if res is None or "No analizado" in res.alerta:
-                return "No analizado", False
+                return "Error IA (ver log)", True
             if res.ok:
                 return "OK", False
             return res.alerta, True
