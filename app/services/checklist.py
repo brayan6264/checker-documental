@@ -170,6 +170,17 @@ class ChecklistWriter:
             resultado.get("01_acta_visita",     "N/A"),
             resultado.get("01_gestor",          "N/A"),
             resultado.get("01_tratamiento",     "N/A"),
+            # 02
+            resultado.get("02_documentos",      "N/A"),
+            resultado.get("02_acta_visita",     "N/A"),
+            resultado.get("02_diagnostico",     "N/A"),
+            resultado.get("02_plan_negocio",    "N/A"),
+            # 03
+            resultado.get("03_encuestas",       "N/A"),
+            resultado.get("03_grupal",          "N/A"),
+            resultado.get("03_individual",      "N/A"),
+            resultado.get("03_modulos",         "N/A"),
+            resultado.get("03_asistencia",      "N/A"),
             # General
             resultado.get("observaciones", ""),
         ]
