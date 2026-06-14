@@ -287,12 +287,3 @@ Responde SOLO con este JSON:
 
     return ResultadoAnalisis(ok=True)
 
-
-if __name__ == "__main__":
-
-    ruta = r"C:\Users\Usuario\Downloads\PLAN DE NEGOCIO_20736200.xlsx"
-
-    resultado = analizar_plan_negocio(ruta)
-
-    print("\n=== RESULTADO ===")
-    print(resultado)
