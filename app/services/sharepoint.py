@@ -557,6 +557,8 @@ def descargar_carpeta_03(url: str, dest_base: Path, id_unico: str) -> dict:
             (id_digits and id_digits in stem_norm)
             or (id_unico and normalizar(id_unico) in stem_norm)
             or re.search(r'\bid[_\s]?\d', stem_norm) is not None
+            or "formacion" in stem_norm
+            or "cumplimiento" in stem_norm
         )
 
         if not (es_encuesta or es_grupal or es_individual):
