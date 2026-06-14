@@ -192,6 +192,8 @@ Verás una pantalla similar a esta:
 │  Request body     multipart/form-data                           │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │ archivo  [  matriz.xlsx          ] [Choose File]          │  │
+│  │                                                           │  │
+│  │ flujos   [                       ]  (opcional)            │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
 │                                          [ Clear ]  [ Execute ] │
@@ -202,14 +204,40 @@ Verás una pantalla similar a esta:
 1. Clic en `POST /validacion/validar` para expandir el endpoint
 2. Clic en **Try it out** (esquina superior derecha del endpoint)
 3. Clic en **Choose File** → seleccionar el archivo Excel de la matriz
-4. Clic en **Execute**
+4. En el campo `flujos` escribir los flujos que deseas ejecutar (ver tabla abajo)
+5. Clic en **Execute**
+
+**Campo `flujos` — selección de carpetas a validar:**
+
+| Valor en `flujos` | Carpeta validada | Qué revisa |
+|---|---|---|
+| `00` | `00_DOCUMENTACION` | Cédula, RUT, Comercio, Tenencia |
+| `01` | `01_VISITA_1_CARACTERIZACION` | Acta compromiso, acta visita, fotos, gestor, tratamiento datos |
+| `02` | `02_VISITA_2_DIAGNOSTICO` | Acta visita 2, diagnóstico, plan de negocio |
+| `03` | `03_CAPACITACION` | Encuestas, grupal, individual, módulos TX/RX |
+
+**Ejemplos de combinaciones:**
+
+| Qué ejecutar | Valor del campo `flujos` |
+|---|---|
+| Todo el flujo completo | *(dejar vacío)* |
+| Solo documentación | `00` |
+| Solo primera visita | `01` |
+| Solo segunda visita | `02` |
+| Solo capacitación | `03` |
+| Documentación + primera visita | `00,01` |
+| Las dos visitas | `01,02` |
+| Todo excepto capacitación | `00,01,02` |
+| Capacitación + documentación | `00,03` |
+
+Las columnas de las carpetas no ejecutadas aparecerán como `—` en el checklist de salida.
 
 **Respuesta esperada (HTTP 200):**
 ```json
 {
   "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "estado": "iniciado",
-  "mensaje": "Validación iniciada en background",
+  "flujos": ["00", "01", "02", "03"],
   "estado_url": "/validacion/estado/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "resultado_url": "/validacion/resultado/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 }

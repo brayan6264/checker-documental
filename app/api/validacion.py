@@ -8,9 +8,9 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.config import JOBS_DIR
@@ -24,14 +24,46 @@ router   = APIRouter()
 _jobs: Dict[str, Dict[str, Any]] = {}
 
 
+_FLUJOS_VALIDOS = {"00", "01", "02", "03"}
+
+
 @router.post("/validar", summary="Inicia la validación de una matriz Excel")
 async def iniciar_validacion(
     archivo: UploadFile = File(..., description="Archivo .xlsx de la matriz de entrada"),
+    flujos: Optional[str] = Form(
+        default=None,
+        description=(
+            "Flujos a ejecutar, separados por coma. "
+            "Valores posibles: 00, 01, 02, 03. "
+            "Dejar vacío para ejecutar todos. "
+            "Ejemplos: '00,01'  |  '02,03'  |  '00'"
+        ),
+    ),
 ):
     """
     Sube el Excel de la matriz y lanza el proceso en background.
     Responde inmediatamente con job_id y URLs de estado/resultado.
+
+    El parámetro `flujos` permite elegir qué carpetas validar:
+    - **00** : Documentación (cédula, RUT, comercio, tenencia)
+    - **01** : Visita 1 — Caracterización (acta, fotos, tratamiento de datos)
+    - **02** : Visita 2 — Diagnóstico y plan de negocio
+    - **03** : Capacitación (encuestas, grupos, módulos TX/RX)
+
+    Se pueden combinar: `00,01` valida solo documentación y primera visita.
     """
+    # Parsear y validar flujos
+    if flujos and flujos.strip():
+        flujos_set = {f.strip() for f in flujos.split(",")}
+        invalidos = flujos_set - _FLUJOS_VALIDOS
+        if invalidos:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Flujos inválidos: {invalidos}. Valores permitidos: {_FLUJOS_VALIDOS}",
+            )
+    else:
+        flujos_set = None  # None = todos
+
     job_id          = str(uuid.uuid4())
     job_dir         = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -41,24 +73,31 @@ async def iniciar_validacion(
 
     contenido = await archivo.read()
     ruta_entrada.write_bytes(contenido)
-    logger.info("Job %s: archivo recibido (%d bytes).", job_id, len(contenido))
+    logger.info(
+        "Job %s: archivo recibido (%d bytes), flujos=%s.",
+        job_id, len(contenido), flujos_set or "todos",
+    )
 
     _jobs[job_id] = {
         "estado":           "iniciado",
         "filas_total":      0,
         "filas_procesadas": 0,
         "errores":          0,
+        "flujos":           sorted(flujos_set) if flujos_set else ["00", "01", "02", "03"],
         "ruta_checklist":   str(ruta_checklist),
     }
 
     task = asyncio.create_task(
-        asyncio.to_thread(_ejecutar_validacion, job_id, str(ruta_entrada), str(ruta_checklist))
+        asyncio.to_thread(
+            _ejecutar_validacion, job_id, str(ruta_entrada), str(ruta_checklist), flujos_set,
+        )
     )
     _jobs[job_id]["_task"] = task
 
     return {
         "job_id":        job_id,
         "estado":        "iniciado",
+        "flujos":        sorted(flujos_set) if flujos_set else ["00", "01", "02", "03"],
         "estado_url":    f"/validacion/estado/{job_id}",
         "resultado_url": f"/validacion/resultado/{job_id}",
     }
@@ -102,7 +141,12 @@ async def descargar_resultado(job_id: str):
 
 # ── Función de fondo ──────────────────────────────────────────────────────────
 
-def _ejecutar_validacion(job_id: str, ruta_entrada: str, ruta_checklist: str) -> None:
+def _ejecutar_validacion(
+    job_id: str,
+    ruta_entrada: str,
+    ruta_checklist: str,
+    flujos: Optional[set] = None,
+) -> None:
     t0 = time.perf_counter()
     try:
         _jobs[job_id]["estado"]      = "procesando"
@@ -116,6 +160,7 @@ def _ejecutar_validacion(job_id: str, ruta_entrada: str, ruta_checklist: str) ->
         ValidadorDocumental(
             ruta_checklist=ruta_checklist,
             callback_progreso=_progreso,
+            flujos=flujos,
         ).procesar_matriz(ruta_entrada)
 
         elapsed = time.perf_counter() - t0
