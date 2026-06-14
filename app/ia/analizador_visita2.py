@@ -1,20 +1,38 @@
 """
-Análisis del archivo Plan de Negocio.
+Analizadores de documentos de la carpeta
+02_VISITA_2_DIAGNOSTICO.
 
-Verifica que los campos mínimos de control definidos para el formulario
-estén diligenciados en la primera hoja del archivo Excel.
-
-Retorna:
-- completo: True/False
-- faltantes: lista de campos vacíos
+- Plan de Negocio
+- Diagnóstico
 """
 
+import logging
+from pathlib import Path
 from typing import Dict, List
 
 import openpyxl
 
+from app.config import (
+    IA_HABILITADO,
+    IA_MAX_PAGINAS_VISITA,
+    OPENAI_API_KEY,
+)
 
-# Campos de control definidos para la primera versión
+from app.ia.analizador_visita import (
+    ResultadoAnalisis,
+    _SISTEMA_BASE,
+    _llamar_gpt,
+    _obtener_imagenes_b64,
+    _parsear_json,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PLAN DE NEGOCIO
+# ──────────────────────────────────────────────────────────────────────────────
+
 CAMPOS_CONTROL = {
     "D11": "Nombre Unidad Productiva",
     "D12": "Nombre representante",
@@ -41,16 +59,6 @@ CAMPOS_CONTROL = {
 def analizar_plan_negocio(ruta_excel: str) -> Dict[str, object]:
     """
     Valida que los campos mínimos del plan de negocio estén diligenciados.
-
-    Args:
-        ruta_excel:
-            Ruta del archivo .xlsx
-
-    Returns:
-        {
-            "completo": bool,
-            "faltantes": [str]
-        }
     """
 
     faltantes: List[str] = []
@@ -85,3 +93,115 @@ def analizar_plan_negocio(ruta_excel: str) -> Dict[str, object]:
             "completo": False,
             "faltantes": [f"Error al leer archivo: {exc}"],
         }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DIAGNÓSTICO
+# ──────────────────────────────────────────────────────────────────────────────
+
+def analizar_diagnostico(
+    ruta_pdf: str | Path,
+) -> ResultadoAnalisis:
+    """
+    Verifica que todas las secciones principales del
+    Diagnóstico DPS estén diligenciadas.
+    """
+
+    if not IA_HABILITADO or not OPENAI_API_KEY:
+        return ResultadoAnalisis(ok=True, alerta="")
+
+    ruta = Path(ruta_pdf)
+
+    imagenes = _obtener_imagenes_b64(
+        ruta,
+        IA_MAX_PAGINAS_VISITA,
+    )
+
+    if not imagenes:
+        return ResultadoAnalisis(
+            ok=False,
+            alerta="No se pudo leer el archivo para análisis IA",
+        )
+
+    prompt_usuario = """Analiza este formato DIAGNÓSTICO DE UNIDADES PRODUCTIVAS DPS escaneado.
+
+Verifica los siguientes puntos:
+
+1. ¿Todos los campos OBLIGATORIOS del formulario tienen contenido?
+    - Un campo obligatorio está vacío SOLO si está completamente en blanco.
+
+2. Para preguntas con opciones SI / NO:
+   - Debe existir al menos una opción marcada.
+
+3. Para preguntas que incluyan observaciones, descripción,
+   comentarios o justificaciones:
+   - Debe existir contenido escrito.
+
+4. Para espacios de firma:
+   - Cualquier rúbrica, garabato o marca visible cuenta como firma.
+
+5. Ignora campos que indiquen:
+   - si aplica
+   - cuando aplique
+   - opcional
+   - no aplica
+   - o cualquier variante equivalente
+
+Responde SOLO con este JSON:
+
+{
+  "campos_completos": true/false,
+  "campos_vacios": [
+    "lista de campos obligatorios completamente vacíos"
+  ],
+  "alerta": "descripción breve del problema o null"
+}
+"""
+
+    try:
+
+        data = _parsear_json(
+            _llamar_gpt(
+                imagenes,
+                _SISTEMA_BASE,
+                prompt_usuario,
+            )
+        )
+
+    except Exception as exc:
+
+        logger.error(
+            "Error IA diagnóstico '%s': %s",
+            ruta.name,
+            exc,
+        )
+
+        return ResultadoAnalisis(
+            ok=False,
+            alerta=f"Error en análisis IA: {exc}",
+        )
+
+    if not data.get("campos_completos", True):
+
+        campos_vacios = data.get(
+            "campos_vacios",
+            [],
+        )
+
+        if campos_vacios:
+
+            return ResultadoAnalisis(
+                ok=False,
+                alerta=(
+                    "Campos vacíos: "
+                    + ", ".join(campos_vacios[:5])
+                ),
+            )
+
+        return ResultadoAnalisis(
+            ok=False,
+            alerta=data.get("alerta")
+            or "Diagnóstico incompleto",
+        )
+
+    return ResultadoAnalisis(ok=True)

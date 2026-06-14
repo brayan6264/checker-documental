@@ -48,7 +48,7 @@ from app.services.checklist import ChecklistWriter
 from app.services.sharepoint import descargar_carpeta_doc, descargar_visita_selectiva
 
 from app.core.reglas import DOCS_VISITA2_ORDEN
-from app.ia.analizador_plan_negocio import analizar_plan_negocio
+from app.ia.analizador_visita2 import (analizar_plan_negocio, analizar_diagnostico)
 from app.services.sharepoint import descargar_visita2_selectiva
 
 logger = logging.getLogger(__name__)
@@ -325,6 +325,7 @@ class ValidadorDocumental:
         }
 
         acta_visita2 = "No analizado"
+        diagnostico = "No analizado"
         plan_negocio = "No analizado"
 
         try:
@@ -343,6 +344,7 @@ class ValidadorDocumental:
                     "encontrada": False,
                     "docs_visita2": docs_visita2,
                     "acta_visita_2": acta_visita2,
+                    "diagnostico": diagnostico,
                     "plan_negocio": plan_negocio,
                     "observaciones": obs,
                     "tiene_error": tiene_error,
@@ -379,6 +381,40 @@ class ValidadorDocumental:
                             obs.append(
                                 f"Acta Visita 2: error — {exc}"
                             )
+                            tiene_error = True
+
+
+                # DIAGNOSTICO
+                elif keyword == "DIAGNOSTICO":
+
+                    if IA_HABILITADO:
+
+                        try:
+
+                            res = analizar_diagnostico(
+                                str(ruta_archivo)
+                            )
+
+                            if res.ok:
+                                diagnostico = "OK"
+
+                            else:
+                                diagnostico = res.alerta
+
+                                obs.append(
+                                    f"Diagnóstico: {res.alerta}"
+                                )
+
+                                tiene_error = True
+
+                        except Exception as exc:
+
+                            diagnostico = f"Error: {exc}"
+
+                            obs.append(
+                                f"Diagnóstico: error — {exc}"
+                            )
+
                             tiene_error = True
 
                 # PLAN_NEGOCIO
@@ -426,6 +462,7 @@ class ValidadorDocumental:
             "encontrada": True,
             "docs_visita2": docs_visita2,
             "acta_visita_2": acta_visita2,
+            "diagnostico": diagnostico,
             "plan_negocio": plan_negocio,
             "observaciones": obs,
             "tiene_error": tiene_error,
@@ -592,6 +629,24 @@ class ValidadorDocumental:
                 alerta_acta2 = False
             else:
                 alerta_acta2 = "OK" not in str(acta2_valor)
+            
+        # ── Diagnóstico ──────────────────────────────────────────────────────
+        if not encontrada2:
+            diagnostico_valor = "N/A"
+            alerta_diagnostico = False
+
+        else:
+            diagnostico_valor = resultado_visita2.get(
+                "diagnostico",
+                "No analizado",
+            )
+
+            if diagnostico_valor in ("N/A", "No analizado"):
+                alerta_diagnostico = False
+            else:
+                alerta_diagnostico = (
+                    "OK" not in str(diagnostico_valor)
+                )
 
         # ── Plan de Negocio ───────────────────────────────────────────────────
         if not encontrada2:
@@ -632,10 +687,12 @@ class ValidadorDocumental:
             # Carpeta 02
             "02_documentos": docs_02_valor,
             "02_acta_visita": acta2_valor,
+            "02_diagnostico": diagnostico_valor,
             "02_plan_negocio": plan_valor,
 
             "02_alertas_por_doc": {
                 "02_ACTA_VISITA": alerta_acta2,
+                "02_DIAGNOSTICO": alerta_diagnostico,
                 "02_PLAN_NEGOCIO": alerta_plan,
             },
             "observaciones":   "; ".join(observaciones),

@@ -61,6 +61,7 @@ COLUMNAS = [
     # Carpeta 02_VISITA_2_DIAGNOSTICO
     "02_DOCUMENTOS",      # existencia de Acta 2, Diagnóstico y Plan de Negocio
     "02_ACTA_VISITA",     # revisión del acta de visita 2
+    "02_DIAGNOSTICO",     # revisión del diagnóstico
     "02_PLAN_NEGOCIO",    # validación del plan de negocio
     # General
     "observaciones",
@@ -73,7 +74,7 @@ _ANCHOS_MIN = {
     "01_DOCUMENTOS":     38, "01_FOTOS_VIDEOS":     22,
     "ACTA_COMPROMISO":   35, "ACTA_VISITA":         35,
     "GESTOR":            40, "TRATAMIENTO_DATOS":   35,
-    "02_DOCUMENTOS":     35, "02_ACTA_VISITA":      35, "02_PLAN_NEGOCIO": 35,
+    "02_DOCUMENTOS":     35, "02_ACTA_VISITA":      35, "02_DIAGNOSTICO": 35, "02_PLAN_NEGOCIO": 35,
     "observaciones":     50,
 }
 
@@ -92,7 +93,7 @@ _COLS_DOC_REV_IDX = {
 _COL_DOCS2_IDX = COLUMNAS.index("02_DOCUMENTOS") + 1
 _COLS_DOC_REV2_IDX = {
     col: COLUMNAS.index(col) + 1
-    for col in ("02_ACTA_VISITA","02_PLAN_NEGOCIO",
+    for col in ("02_ACTA_VISITA","02_DIAGNOSTICO", "02_PLAN_NEGOCIO",
     )
 }
 
@@ -103,7 +104,7 @@ _GRUPOS_ORDEN = [
     ("01 Visita",        ["01_DOCUMENTOS", "01_FOTOS_VIDEOS",
                           "ACTA_COMPROMISO", "ACTA_VISITA", "GESTOR",
                           "TRATAMIENTO_DATOS"],                                    _VERDE),
-     ("02 Visita",        ["02_DOCUMENTOS", "02_ACTA_VISITA", "02_PLAN_NEGOCIO"], _VERDE),
+     ("02 Visita",        ["02_DOCUMENTOS", "02_ACTA_VISITA", "02_DIAGNOSTICO", "02_PLAN_NEGOCIO"], _VERDE),
     ("General",          ["observaciones"],                                        _GRIS),
 ]
 
@@ -153,6 +154,7 @@ class ChecklistWriter:
             # 02
             resultado.get("02_documentos",      "N/A"),
             resultado.get("02_acta_visita",     "N/A"),
+            resultado.get("02_diagnostico",     "N/A"),
             resultado.get("02_plan_negocio",    "N/A"),
             # General
             resultado.get("observaciones", ""),
