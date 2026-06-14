@@ -76,6 +76,20 @@ PALABRAS_CLAVE_VISITA: dict[str, list[str]] = {
 
 DOCS_VISITA_ORDEN = ["ACTA_COMPROMISO", "ACTA_VISITA_1", "TRATAMIENTO_DATOS"]
 
+# ── Carpeta 02_VISITA_2_DIAGNOSTICO ──────────────────────────────────────────
+
+PALABRAS_CLAVE_VISITA2: dict[str, list[str]] = {
+    "ACTA_VISITA_2": ["acta"],
+    "DIAGNOSTICO": ["diagnostico"],
+    "PLAN_NEGOCIO": ["plan de negocio"],
+}
+
+DOCS_VISITA2_ORDEN = [
+    "ACTA_VISITA_2",
+    "DIAGNOSTICO",
+    "PLAN_NEGOCIO",
+]
+
 # Extensiones consideradas "media" (imagen o video).
 EXTENSIONES_MEDIA = {
     ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp",

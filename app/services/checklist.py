@@ -58,17 +58,22 @@ COLUMNAS = [
     "ACTA_VISITA",       # revisión del acta de visita
     "GESTOR",            # gestor extraído del acta de visita y verificado en BD
     "TRATAMIENTO_DATOS", # revisión de autorización de tratamiento de datos
+    # Carpeta 02_VISITA_2_DIAGNOSTICO
+    "02_DOCUMENTOS",      # existencia de Acta 2, Diagnóstico y Plan de Negocio
+    "02_ACTA_VISITA",     # revisión del acta de visita 2
+    "02_PLAN_NEGOCIO",    # validación del plan de negocio
     # General
     "observaciones",
 ]
 
 _ANCHOS_MIN = {
-    "ID_unico":          18, "modalidad":       10, "unidad_doc":      22,
-    "CEDULA":            18, "COMERCIO":        18, "RUT":             14,
+    "ID_unico":          18, "modalidad":           10, "unidad_doc":      22,
+    "CEDULA":            18, "COMERCIO":            18, "RUT":             14,
     "TENENCIA":          18,
-    "01_DOCUMENTOS":     38, "01_FOTOS_VIDEOS": 22,
-    "ACTA_COMPROMISO":   35, "ACTA_VISITA":     35,
-    "GESTOR":            40, "TRATAMIENTO_DATOS": 35,
+    "01_DOCUMENTOS":     38, "01_FOTOS_VIDEOS":     22,
+    "ACTA_COMPROMISO":   35, "ACTA_VISITA":         35,
+    "GESTOR":            40, "TRATAMIENTO_DATOS":   35,
+    "02_DOCUMENTOS":     35, "02_ACTA_VISITA":      35, "02_PLAN_NEGOCIO": 35,
     "observaciones":     50,
 }
 
@@ -84,6 +89,12 @@ _COLS_DOC_REV_IDX = {
     col: COLUMNAS.index(col) + 1
     for col in ("ACTA_COMPROMISO", "ACTA_VISITA", "GESTOR", "TRATAMIENTO_DATOS")
 }
+_COL_DOCS2_IDX = COLUMNAS.index("02_DOCUMENTOS") + 1
+_COLS_DOC_REV2_IDX = {
+    col: COLUMNAS.index(col) + 1
+    for col in ("02_ACTA_VISITA","02_PLAN_NEGOCIO",
+    )
+}
 
 # Orden y color de cada grupo-carpeta para la fila de encabezado superior
 _GRUPOS_ORDEN = [
@@ -92,6 +103,7 @@ _GRUPOS_ORDEN = [
     ("01 Visita",        ["01_DOCUMENTOS", "01_FOTOS_VIDEOS",
                           "ACTA_COMPROMISO", "ACTA_VISITA", "GESTOR",
                           "TRATAMIENTO_DATOS"],                                    _VERDE),
+     ("02 Visita",        ["02_DOCUMENTOS", "02_ACTA_VISITA", "02_PLAN_NEGOCIO"], _VERDE),
     ("General",          ["observaciones"],                                        _GRIS),
 ]
 
@@ -138,6 +150,10 @@ class ChecklistWriter:
             resultado.get("01_acta_visita",     "N/A"),
             resultado.get("01_gestor",          "N/A"),
             resultado.get("01_tratamiento",     "N/A"),
+            # 02
+            resultado.get("02_documentos",      "N/A"),
+            resultado.get("02_acta_visita",     "N/A"),
+            resultado.get("02_plan_negocio",    "N/A"),
             # General
             resultado.get("observaciones", ""),
         ]
@@ -164,6 +180,16 @@ class ChecklistWriter:
             celda.fill = FILL_ROJO
             celda.font = FONT_FALTA
 
+         # Rojo en 02_DOCUMENTOS si hay alguno faltante
+        val_docs2 = str(valores[COLUMNAS.index("02_DOCUMENTOS")])
+        if "FALTA" in val_docs2.upper():
+            celda = self._ws.cell(
+                row=fila_num,
+                column=COLUMNAS.index("02_DOCUMENTOS") + 1,
+            )
+            celda.fill = FILL_ROJO
+            celda.font = FONT_FALTA
+
         # Rojo en 01_FOTOS_VIDEOS si insuficientes
         val_fotos = str(valores[COLUMNAS.index("01_FOTOS_VIDEOS")])
         if "FALTA" in val_fotos.upper():
@@ -183,6 +209,15 @@ class ChecklistWriter:
         for col_nombre, col_idx in _COLS_DOC_REV_IDX.items():
             if alertas_por_col.get(col_nombre, False):
                 celda      = self._ws.cell(row=fila_num, column=col_idx)
+                celda.fill = FILL_AMARILLO
+                celda.font = FONT_IA_WARN
+
+        # Amarillo en columnas de revisión de la carpeta 02
+        alertas_por_col_02 = resultado.get("02_alertas_por_doc", {})
+
+        for col_nombre, col_idx in _COLS_DOC_REV2_IDX.items():
+            if alertas_por_col_02.get(col_nombre, False):
+                celda = self._ws.cell(row=fila_num, column=col_idx)
                 celda.fill = FILL_AMARILLO
                 celda.font = FONT_IA_WARN
 

@@ -152,6 +152,15 @@ def _buscar_carpeta_visita_en_sharepoint(
         lambda n: "01" in n and ("visita" in n or "caracterizacion" in n),
     )
 
+def _buscar_carpeta_visita2_en_sharepoint(
+    sess: requests.Session, host: str, web: str, rel_raiz: str
+) -> str | None:
+    """Localiza la subcarpeta 02_VISITA_2_DIAGNOSTICO."""
+    return _buscar_subcarpeta(
+        sess, host, web,  rel_raiz,
+        lambda n: "02" in n and ("visita" in n or "diagnostico" in n),
+    )
+
 
 def _listar_arbol(
     sess: requests.Session, host: str, web: str, rel_raiz: str
@@ -378,6 +387,94 @@ def descargar_visita_selectiva(
     }
     return resultado
 
+def descargar_visita2_selectiva(
+    url: str,
+    dest_base: Path,
+) -> dict:
+    """
+    Procesa la carpeta 02_VISITA_2_DIAGNOSTICO de forma selectiva:
+
+      1. Localiza la subcarpeta 02_VISITA_2_DIAGNOSTICO.
+      2. Lista todos sus archivos.
+      3. Descarga únicamente:
+           - ACTA_VISITA_2
+           - DIAGNOSTICO
+           - PLAN_NEGOCIO
+
+    Retorna:
+      encontrada  → bool
+      docs_rutas  → rutas locales de los documentos encontrados
+      stats       → estadísticas de descarga
+    """
+
+    from app.core.normalizacion import normalizar as _norm
+    from app.core.visita2 import PALABRAS_CLAVE_VISITA2
+
+    resultado = {
+        "encontrada": False,
+        "docs_rutas": {k: None for k in PALABRAS_CLAVE_VISITA2},
+        "stats": {"total": 0, "exitosos": 0, "fallidos": 0},
+    }
+
+    sess = _nueva_sesion()
+    host, web, rel = resolver(sess, url)
+
+    rel_visita2 = _buscar_carpeta_visita2_en_sharepoint(
+        sess, host, web, rel,
+    )
+
+    if rel_visita2 is None:
+        return resultado
+
+    resultado["encontrada"] = True
+
+    todos_archivos = _listar_arbol(
+        sess, host, web, rel_visita2,
+    )
+
+    a_descargar = {}
+
+    for srel in todos_archivos:
+        nombre = srel.rstrip("/").split("/")[-1]
+        stem = _norm(Path(nombre).stem)
+
+        for keyword, palabras in PALABRAS_CLAVE_VISITA2.items():
+            if keyword not in a_descargar and any(
+                palabra in stem
+                for palabra in palabras
+            ):
+                a_descargar[keyword] = srel
+                break
+
+    if not a_descargar:
+        return resultado
+
+    dest_base.mkdir(parents=True, exist_ok=True)
+
+    exitosos = 0
+    fallidos = 0
+
+    for keyword, srel in a_descargar.items():
+        nombre_archivo = srel.rstrip("/").split("/")[-1]
+        destino = dest_base / nombre_archivo
+
+        size = _bajar_archivo(
+            sess, host, srel, destino,
+        )
+
+        if size >= 0:
+            resultado["docs_rutas"][keyword] = destino
+            exitosos += 1
+        else:
+            fallidos += 1
+
+    resultado["stats"] = {
+        "total": len(a_descargar),
+        "exitosos": exitosos,
+        "fallidos": fallidos,
+    }
+
+    return resultado
 
 def descargar_carpeta(url: str, dest_base: Path | None = None) -> tuple[Path, dict]:
     """
