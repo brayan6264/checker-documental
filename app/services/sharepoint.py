@@ -476,6 +476,144 @@ def descargar_visita2_selectiva(
 
     return resultado
 
+def _buscar_carpeta_03_en_sharepoint(
+    sess: requests.Session, host: str, web: str, rel_raiz: str
+) -> str | None:
+    """Localiza la subcarpeta que empieza por '03' (capacitación/formación)."""
+    return _buscar_subcarpeta(
+        sess, host, web, rel_raiz,
+        lambda n: n.startswith("03"),
+    )
+
+
+def _es_carpeta_modulo(nombre: str) -> bool:
+    """True si el nombre normalizado corresponde a una carpeta de módulo."""
+    return bool(re.search(r'mod(?:ulo)?[_\s\-]*\d', nombre))
+
+
+def _es_txrx(stem_norm: str) -> bool:
+    """
+    True si el stem normalizado corresponde a un archivo de lista de asistencia.
+    Patrones reales observados: T3_R5_..., T1_R4_..., TX_RX_..., RX_TX_...
+    Regla: empieza por t{dígito(s)}_r{dígito(s)} o r{dígito(s)}_t{dígito(s)},
+    o contiene literalmente 'tx' y 'rx'.
+    """
+    return bool(
+        re.match(r't\d+[_\-]r\d+', stem_norm)
+        or re.match(r'r\d+[_\-]t\d+', stem_norm)
+        or ("tx" in stem_norm and "rx" in stem_norm)
+    )
+
+
+def descargar_carpeta_03(url: str, dest_base: Path, id_unico: str) -> dict:
+    """
+    Procesa la carpeta 03_* (capacitación) de forma selectiva:
+
+    Raíz:
+      - Descarga archivos con "encuesta" / "encuestas" en el nombre.
+      - Descarga archivo con "grupal" en el nombre.
+      - Descarga archivo con ID_<id_unico> en el nombre.
+
+    Subcarpetas de módulo (nombre contiene "modulo" o "mod" + dígito):
+      - Descarga el archivo TX_RX (o RX_TX).
+      - Cuenta los demás archivos como evidencia fotográfica (sin descargarlos).
+
+    Retorna:
+      encontrada  → bool
+      root        → {encuestas: [Path], grupal: Path|None, individual: Path|None}
+      modulos     → [{nombre, txrx: Path|None, conteo_evidencia: int}]
+    """
+    resultado: dict = {
+        "encontrada": False,
+        "root": {"encuestas": [], "grupal": None, "individual": None},
+        "modulos": [],
+    }
+
+    sess           = _nueva_sesion()
+    host, web, rel = resolver(sess, url)
+
+    rel_03 = _buscar_carpeta_03_en_sharepoint(sess, host, web, rel)
+    if rel_03 is None:
+        logger.warning("No se encontró carpeta 03 en: %s", rel)
+        return resultado
+
+    resultado["encontrada"] = True
+    logger.info("Carpeta 03 encontrada: %s", rel_03)
+
+    subcarpetas, archivos_raiz = _listar_carpeta(sess, host, web, rel_03)
+    dest_base.mkdir(parents=True, exist_ok=True)
+
+    # Dígitos del id_unico para detectar el informe individual
+    id_digits = "".join(c for c in id_unico if c.isdigit())
+
+    # ── Archivos en la raíz de 03 ─────────────────────────────────────────────
+    for srel in archivos_raiz:
+        nombre    = srel.rstrip("/").split("/")[-1]
+        stem_norm = normalizar(Path(nombre).stem)
+
+        es_encuesta   = "encuesta" in stem_norm or "encuestas" in stem_norm
+        es_grupal     = "grupal" in stem_norm
+        es_individual = (
+            (id_digits and id_digits in stem_norm)
+            or (id_unico and normalizar(id_unico) in stem_norm)
+            or re.search(r'\bid[_\s]?\d', stem_norm) is not None
+        )
+
+        if not (es_encuesta or es_grupal or es_individual):
+            continue
+
+        destino = dest_base / nombre
+        size    = _bajar_archivo(sess, host, srel, destino)
+        if size < 0:
+            continue
+
+        if es_encuesta:
+            resultado["root"]["encuestas"].append(destino)
+        if es_grupal and resultado["root"]["grupal"] is None:
+            resultado["root"]["grupal"] = destino
+        if es_individual and resultado["root"]["individual"] is None:
+            resultado["root"]["individual"] = destino
+
+    # ── Subcarpetas de módulo ─────────────────────────────────────────────────
+    for rel_sub in subcarpetas:
+        nombre_sub = rel_sub.rstrip("/").split("/")[-1]
+        if not _es_carpeta_modulo(normalizar(nombre_sub)):
+            logger.debug("Subcarpeta ignorada (no es módulo): %s", nombre_sub)
+            continue
+
+        _, archivos_mod = _listar_carpeta(sess, host, web, rel_sub)
+
+        dest_mod = dest_base / nombre_sub
+        dest_mod.mkdir(parents=True, exist_ok=True)
+
+        txrx_path      = None
+        conteo_evidencia = 0
+
+        for srel_arch in archivos_mod:
+            nombre_arch = srel_arch.rstrip("/").split("/")[-1]
+            stem_norm   = normalizar(Path(nombre_arch).stem)
+
+            if _es_txrx(stem_norm):
+                destino = dest_mod / nombre_arch
+                size    = _bajar_archivo(sess, host, srel_arch, destino)
+                if size >= 0:
+                    txrx_path = destino
+            else:
+                conteo_evidencia += 1
+
+        resultado["modulos"].append({
+            "nombre":           nombre_sub,
+            "txrx":             txrx_path,
+            "conteo_evidencia": conteo_evidencia,
+        })
+        logger.info(
+            "  Módulo '%s': txrx=%s, evidencia=%d",
+            nombre_sub, txrx_path is not None, conteo_evidencia,
+        )
+
+    return resultado
+
+
 def descargar_carpeta(url: str, dest_base: Path | None = None) -> tuple[Path, dict]:
     """
     Descarga la carpeta raíz completa (para uso externo / endpoint /descargar).

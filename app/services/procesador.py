@@ -15,24 +15,25 @@ Flujo por fila:
 
 import logging
 import shutil
+import time
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
 import openpyxl
 import pandas as pd
-from app.core.visita2 import validar_visita2
-
 from app.config import CHECKLIST_LOTE_GUARDADO, DOWNLOADS_DIR, IA_HABILITADO
 from app.core.normalizacion import normalizar
 from app.core.reglas import (
     DOCS_VISITA_ORDEN,
-    DOCUMENTOS_ORDEN,
     DOCS_VISITA2_ORDEN,
+    DOCUMENTOS_ORDEN,
     EXTENSIONES_MEDIA,
     MIN_ARCHIVOS_MEDIA,
+    MIN_ASISTENTES_03,
     PALABRAS_CLAVE,
     PALABRAS_CLAVE_VISITA,
     REGLAS,
+    UNIDAD_DOC_TIPO,
     Estado,
     evaluar_documentos,
     estados_por_defecto,
@@ -43,13 +44,16 @@ from app.ia.analizador_visita import (
     analizar_acta_visita,
     analizar_tratamiento_datos,
 )
+from app.ia.analizador_visita2 import analizar_diagnostico, analizar_plan_negocio
+from app.ia.analizador_03 import extraer_nombre_encuesta, validar_nombres_en_txrx
 from app.core.gestores import buscar_gestor
 from app.services.checklist import ChecklistWriter
-from app.services.sharepoint import descargar_carpeta_doc, descargar_visita_selectiva
-
-from app.core.reglas import DOCS_VISITA2_ORDEN
-from app.ia.analizador_visita2 import (analizar_plan_negocio, analizar_diagnostico)
-from app.services.sharepoint import descargar_visita2_selectiva
+from app.services.sharepoint import (
+    descargar_carpeta_doc,
+    descargar_carpeta_03,
+    descargar_visita_selectiva,
+    descargar_visita2_selectiva,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +92,7 @@ class ValidadorDocumental:
     # ── Punto de entrada principal ────────────────────────────────────────────
 
     def procesar_matriz(self, ruta_excel: str) -> None:
+        t_inicio = time.perf_counter()
         logger.info("Cargando matriz: %s", ruta_excel)
         df    = self._cargar_matriz(ruta_excel)
         total = len(df)
@@ -109,12 +114,15 @@ class ValidadorDocumental:
                 continue
 
             logger.info("[%d/%d] ID: %s", procesadas + 1, total, id_unico)
+            t_fila = time.perf_counter()
             resultado = self._procesar_fila(fila)
+            elapsed_fila = time.perf_counter() - t_fila
 
             if resultado.get("_tiene_error"):
                 errores += 1
                 logger.warning("  Alerta: %s", resultado.get("observaciones"))
 
+            logger.info("  [%s] Fila procesada en %.1fs", id_unico, elapsed_fila)
             checklist.agregar_fila(resultado)
             procesadas += 1
 
@@ -122,7 +130,12 @@ class ValidadorDocumental:
                 self.callback_progreso(procesadas, total, errores)
 
         checklist.guardar()
-        logger.info("Terminado. %d/%d procesadas, %d alertas.", procesadas, total, errores)
+        elapsed_total = time.perf_counter() - t_inicio
+        promedio = elapsed_total / procesadas if procesadas else 0
+        logger.info(
+            "Terminado. %d/%d filas | %d alertas | tiempo total: %.1fs | promedio por fila: %.1fs",
+            procesadas, total, errores, elapsed_total, promedio,
+        )
 
     # ── Procesamiento de una fila ─────────────────────────────────────────────
 
@@ -142,7 +155,7 @@ class ValidadorDocumental:
             observaciones.append(f"Modalidad inválida: '{modalidad}'")
             return self._armar_resultado(
                 id_unico, modalidad, unidad_doc, integrante,
-                estados_por_defecto(modalidad), {}, {}, observaciones, tiene_error=True,
+                estados_por_defecto(modalidad), {}, {}, {}, observaciones, tiene_error=True,
             )
 
         # ── 2. Carpeta 00_DOCUMENTACION ───────────────────────────────────────
@@ -155,8 +168,10 @@ class ValidadorDocumental:
                 observaciones.append("00_DOCUMENTACION no encontrada en SharePoint")
                 tiene_error = True
             else:
-                archivos    = self._listar_archivos(str(ruta_doc))
-                presentes   = self._detectar_documentos(archivos)
+                archivos   = self._listar_archivos(str(ruta_doc))
+                rutas_docs = self._detectar_documentos(archivos)
+                self._aplicar_regla_unidad_doc(rutas_docs, archivos, unidad_doc, modalidad)
+                presentes   = {doc: (r is not None) for doc, r in rutas_docs.items()}
                 docs_estado = evaluar_documentos(modalidad, presentes)
                 faltantes   = [d for d, e in docs_estado.items() if e == Estado.FALTA]
                 if faltantes:
@@ -179,7 +194,13 @@ class ValidadorDocumental:
         if resultado_visita2["tiene_error"]:
             tiene_error = True
 
-        # ── 5. Limpiar temporales ─────────────────────────────────────────────
+        # ── 5. Carpeta 03_* (capacitación) ────────────────────────────────────
+        resultado_03 = self._procesar_03(id_unico, modalidad, link, dest_base / "cap03")
+        observaciones.extend(resultado_03["observaciones"])
+        if resultado_03["tiene_error"]:
+            tiene_error = True
+
+        # ── 6. Limpiar temporales ─────────────────────────────────────────────
         if dest_base.exists():
             try:
                 shutil.rmtree(dest_base)
@@ -189,7 +210,8 @@ class ValidadorDocumental:
 
         return self._armar_resultado(
             id_unico, modalidad, unidad_doc, integrante,
-            docs_estado, resultado_visita, resultado_visita2, observaciones, tiene_error,
+            docs_estado, resultado_visita, resultado_visita2, resultado_03,
+            observaciones, tiene_error,
         )
 
     # ── Validación carpeta 01 ─────────────────────────────────────────────────
@@ -305,53 +327,29 @@ class ValidadorDocumental:
             "tiene_error":   tiene_error,
         }
 
-
     # ── Validación carpeta 02 ─────────────────────────────────────────────────
-    def _procesar_visita2(self, id_unico: str, link: str, dest_base: Path) -> dict:
-        """
-        Descarga selectivamente la carpeta 02_VISITA_2_DIAGNOSTICO
-        y valida:
-        - ACTA_VISITA_2
-        - DIAGNOSTICO
-        - PLAN_NEGOCIO
-        """
 
+    def _procesar_visita2(self, id_unico: str, link: str, dest_base: Path) -> dict:
         obs: list[str] = []
         tiene_error = False
-
-        docs_visita2 = {
-            k: "FALTA"
-            for k in DOCS_VISITA2_ORDEN
-        }
-
-        acta_visita2 = "No analizado"
-        diagnostico = "No analizado"
-        plan_negocio = "No analizado"
+        docs_visita2 = {k: "FALTA" for k in DOCS_VISITA2_ORDEN}
+        acta_visita2 = diagnostico = plan_negocio = "No analizado"
 
         try:
             logger.info("  [%s] Buscando 02_VISITA...", id_unico)
-
-            info = descargar_visita2_selectiva(
-                link,
-                dest_base,
-            )
+            info = descargar_visita2_selectiva(link, dest_base)
 
             if not info["encontrada"]:
                 obs.append("02_VISITA_2_DIAGNOSTICO no encontrada")
                 tiene_error = True
-
                 return {
-                    "encontrada": False,
-                    "docs_visita2": docs_visita2,
-                    "acta_visita_2": acta_visita2,
-                    "diagnostico": diagnostico,
+                    "encontrada": False, "docs_visita2": docs_visita2,
+                    "acta_visita_2": acta_visita2, "diagnostico": diagnostico,
                     "plan_negocio": plan_negocio,
-                    "observaciones": obs,
-                    "tiene_error": tiene_error,
+                    "observaciones": obs, "tiene_error": tiene_error,
                 }
 
             for keyword, ruta_archivo in info["docs_rutas"].items():
-
                 if ruta_archivo is None:
                     docs_visita2[keyword] = "FALTA"
                     obs.append(f"02 — {keyword} no encontrado")
@@ -360,134 +358,214 @@ class ValidadorDocumental:
 
                 docs_visita2[keyword] = "OK"
 
-                # ACTA_VISITA_2
-                if keyword == "ACTA_VISITA_2":
+                if not IA_HABILITADO:
+                    continue
 
-                    if IA_HABILITADO:
-                        try:
-                            res = analizar_acta_visita(ruta_archivo)
-
-                            if res.ok:
-                                acta_visita2 = "OK"
-                            else:
-                                acta_visita2 = res.alerta
-                                obs.append(
-                                    f"Acta Visita 2: {res.alerta}"
-                                )
-                                tiene_error = True
-
-                        except Exception as exc:
-                            acta_visita2 = f"Error: {exc}"
-                            obs.append(
-                                f"Acta Visita 2: error — {exc}"
-                            )
+                try:
+                    if keyword == "ACTA_VISITA_2":
+                        res = analizar_acta_visita(ruta_archivo)
+                        acta_visita2 = "OK" if res.ok else res.alerta
+                        if not res.ok:
+                            obs.append(f"Acta Visita 2: {res.alerta}")
                             tiene_error = True
 
-
-                # DIAGNOSTICO
-                elif keyword == "DIAGNOSTICO":
-
-                    if IA_HABILITADO:
-
-                        try:
-
-                            res = analizar_diagnostico(
-                                str(ruta_archivo)
-                            )
-
-                            if res.ok:
-                                diagnostico = "OK"
-
-                            else:
-                                diagnostico = res.alerta
-
-                                obs.append(
-                                    f"Diagnóstico: {res.alerta}"
-                                )
-
-                                tiene_error = True
-
-                        except Exception as exc:
-
-                            diagnostico = f"Error: {exc}"
-
-                            obs.append(
-                                f"Diagnóstico: error — {exc}"
-                            )
-
+                    elif keyword == "DIAGNOSTICO":
+                        res = analizar_diagnostico(str(ruta_archivo))
+                        diagnostico = "OK" if res.ok else res.alerta
+                        if not res.ok:
+                            obs.append(f"Diagnóstico: {res.alerta}")
                             tiene_error = True
 
-                # PLAN_NEGOCIO
-                elif keyword == "PLAN_NEGOCIO":
-
-                    try:
-                        resultado_plan = analizar_plan_negocio(
-                            str(ruta_archivo)
-                        )
-
+                    elif keyword == "PLAN_NEGOCIO":
+                        resultado_plan = analizar_plan_negocio(str(ruta_archivo))
                         if resultado_plan["completo"]:
                             plan_negocio = "OK"
                         else:
-                            faltantes = len(
-                                resultado_plan["faltantes"]
-                            )
-
-                            plan_negocio = (
-                                f"Faltan {faltantes} campos"
-                            )
-
-                            obs.append(
-                                f"Plan de Negocio incompleto "
-                                f"({faltantes} campos)"
-                            )
-
+                            n = len(resultado_plan["faltantes"])
+                            plan_negocio = f"Faltan {n} campos"
+                            obs.append(f"Plan de Negocio incompleto ({n} campos)")
                             tiene_error = True
 
-                    except Exception as exc:
-                        plan_negocio = f"Error: {exc}"
-
-                        obs.append(
-                            f"Plan de Negocio: error — {exc}"
-                        )
-
-                        tiene_error = True
+                except Exception as exc:
+                    obs.append(f"IA 02 {keyword}: error — {exc}")
+                    tiene_error = True
 
         except Exception as exc:
-            obs.append(
-                f"02 — Error procesando visita: {exc}"
-            )
+            obs.append(f"02 — Error procesando visita: {exc}")
             tiene_error = True
 
         return {
-            "encontrada": True,
-            "docs_visita2": docs_visita2,
-            "acta_visita_2": acta_visita2,
-            "diagnostico": diagnostico,
+            "encontrada": True, "docs_visita2": docs_visita2,
+            "acta_visita_2": acta_visita2, "diagnostico": diagnostico,
             "plan_negocio": plan_negocio,
-            "observaciones": obs,
-            "tiene_error": tiene_error,
+            "observaciones": obs, "tiene_error": tiene_error,
         }
 
+    # ── Validación carpeta 03 ─────────────────────────────────────────────────
+
+    def _procesar_03(self, id_unico: str, modalidad: str, link: str, dest_base: Path) -> dict:
+        _NA = {
+            "encontrada": False,
+            "encuestas_valor": "N/A", "grupal_valor": "N/A",
+            "individual_valor": "N/A", "modulos_valor": "N/A",
+            "asistencia_valor": "N/A",
+            "alertas": {k: False for k in (
+                "03_ENCUESTAS", "03_GRUPAL", "03_INDIVIDUAL",
+                "03_MODULOS", "03_ASISTENCIA",
+            )},
+            "observaciones": [], "tiene_error": False,
+        }
+
+        try:
+            info = descargar_carpeta_03(link, dest_base, id_unico)
+        except Exception as exc:
+            _NA["observaciones"] = [f"03 — Error descargando carpeta: {exc}"]
+            _NA["tiene_error"] = True
+            return _NA
+
+        if not info["encontrada"]:
+            _NA["observaciones"] = ["03_CAPACITACION no encontrada en SharePoint"]
+            _NA["tiene_error"] = True
+            return _NA
+
+        obs: list[str] = []
+        tiene_error = False
+        alertas = {k: False for k in _NA["alertas"]}
+        root = info["root"]
+        modulos = info["modulos"]
+
+        min_enc = MIN_ASISTENTES_03.get(modalidad, 1)
+        encuestas = root["encuestas"]
+        n_enc = len(encuestas)
+        if n_enc < min_enc:
+            obs.append(f"03 — Encuestas insuficientes: {n_enc}/{min_enc} mínimo")
+            tiene_error = True
+            alertas["03_ENCUESTAS"] = True
+            encuestas_valor = f"FALTA ({n_enc}/{min_enc} mínimo)"
+        else:
+            encuestas_valor = f"OK ({n_enc} encuestas)"
+
+        if root["grupal"] is None:
+            obs.append("03 — Falta informe GRUPAL")
+            tiene_error = True
+            alertas["03_GRUPAL"] = True
+            grupal_valor = "FALTA"
+        else:
+            grupal_valor = "OK"
+
+        if root["individual"] is None:
+            obs.append(f"03 — Falta informe individual (ID_{id_unico})")
+            tiene_error = True
+            alertas["03_INDIVIDUAL"] = True
+            individual_valor = "FALTA"
+        else:
+            individual_valor = "OK"
+
+        nombres: list[str] = []
+        for ruta_enc in encuestas:
+            try:
+                nombre = extraer_nombre_encuesta(ruta_enc)
+                if nombre:
+                    nombres.append(nombre)
+            except Exception as exc:
+                logger.warning("Error extrayendo nombre de '%s': %s", ruta_enc.name, exc)
+
+        if len(modulos) < 3:
+            obs.append(f"03 — Solo {len(modulos)} carpeta(s) de módulo (se esperan 3)")
+            tiene_error = True
+
+        mod_alertas: list[str] = []
+        asistencia_alertas: list[str] = []
+
+        for mod in modulos:
+            nombre_mod = mod["nombre"]
+            if mod["txrx"] is None:
+                mod_alertas.append(f"{nombre_mod}: sin TX_RX")
+                obs.append(f"03 {nombre_mod} — Falta archivo TX_RX")
+                tiene_error = True
+            if mod["conteo_evidencia"] == 0:
+                mod_alertas.append(f"{nombre_mod}: sin evidencia")
+                obs.append(f"03 {nombre_mod} — Sin evidencia fotográfica")
+                tiene_error = True
+            if IA_HABILITADO and mod["txrx"] and nombres:
+                try:
+                    res = validar_nombres_en_txrx(mod["txrx"], nombres, nombre_mod)
+                    if not res.ok:
+                        asistencia_alertas.append(res.alerta)
+                        obs.append(res.alerta)
+                        tiene_error = True
+                except Exception as exc:
+                    obs.append(f"03 {nombre_mod} — Error IA TX_RX: {exc}")
+
+        if mod_alertas:
+            alertas["03_MODULOS"] = True
+        modulos_valor = (
+            f"OK ({len(modulos)} módulos)" if not mod_alertas
+            else "ALERTA: " + " | ".join(mod_alertas)
+        )
+        if asistencia_alertas:
+            alertas["03_ASISTENCIA"] = True
+        asistencia_valor = "OK" if not asistencia_alertas else "ALERTA: " + " | ".join(asistencia_alertas)
+
+        return {
+            "encontrada": True,
+            "encuestas_valor": encuestas_valor, "grupal_valor": grupal_valor,
+            "individual_valor": individual_valor, "modulos_valor": modulos_valor,
+            "asistencia_valor": asistencia_valor, "alertas": alertas,
+            "observaciones": obs, "tiene_error": tiene_error,
+        }
 
     # ── Detección de documentos en 00 ────────────────────────────────────────
 
     @staticmethod
-    def _listar_archivos(ruta: str) -> list:
+    def _listar_archivos(ruta: str) -> list[Path]:
         import os
-        nombres: list[str] = []
-        for _, _, archivos in os.walk(ruta):
-            nombres.extend(archivos)
-        return nombres
+        paths: list[Path] = []
+        for dirpath, _, archivos in os.walk(ruta):
+            for archivo in archivos:
+                paths.append(Path(dirpath) / archivo)
+        return paths
 
     @staticmethod
-    def _detectar_documentos(archivos: list) -> Dict[str, bool]:
-        presentes = {doc: False for doc in PALABRAS_CLAVE}
+    def _aplicar_regla_unidad_doc(
+        rutas: Dict[str, Optional[Path]],
+        archivos: list[Path],
+        unidad_doc: str,
+        modalidad: str,
+    ) -> None:
+        """
+        Si algún archivo contiene el número de unidad_doc en su nombre y el
+        tipo de documento objetivo (CEDULA o RUT según modalidad) aún no fue
+        detectado, lo asigna como ese tipo.
+        Modifica `rutas` en el lugar.
+        """
+        tipo_objetivo = UNIDAD_DOC_TIPO.get(modalidad)
+        if not tipo_objetivo or not unidad_doc:
+            return
+        if rutas.get(tipo_objetivo) is not None:
+            return  # ya fue detectado por palabra clave, no pisar
+
+        # Limpia el número: solo dígitos para comparar
+        numero = "".join(c for c in unidad_doc if c.isdigit())
+        if not numero:
+            return
+
         for archivo in archivos:
-            stem_norm = normalizar(Path(archivo).stem)
+            stem_limpio = "".join(c for c in archivo.stem if c.isdigit())
+            if numero in stem_limpio or stem_limpio in numero and len(stem_limpio) >= 6:
+                rutas[tipo_objetivo] = archivo
+                return
+
+    @staticmethod
+    def _detectar_documentos(archivos: list[Path]) -> Dict[str, Optional[Path]]:
+        """Retorna {doc: ruta_del_archivo} o None si no se encontró."""
+        rutas: Dict[str, Optional[Path]] = {doc: None for doc in PALABRAS_CLAVE}
+        for archivo in archivos:
+            stem_norm = normalizar(archivo.stem)
             for doc, palabras in PALABRAS_CLAVE.items():
-                if not presentes[doc] and any(p in stem_norm for p in palabras):
-                    presentes[doc] = True
-        return presentes
+                if rutas[doc] is None and any(p in stem_norm for p in palabras):
+                    rutas[doc] = archivo
+        return rutas
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -510,6 +588,7 @@ class ValidadorDocumental:
         docs_estado: Dict[str, Estado],
         resultado_visita: dict,
         resultado_visita2: dict,
+        resultado_03: dict,
         observaciones: list,
         tiene_error: bool,
     ) -> dict:
@@ -685,16 +764,22 @@ class ValidadorDocumental:
                 "TRATAMIENTO_DATOS": alerta_tratamiento,
             },
             # Carpeta 02
-            "02_documentos": docs_02_valor,
-            "02_acta_visita": acta2_valor,
-            "02_diagnostico": diagnostico_valor,
-            "02_plan_negocio": plan_valor,
-
+            "02_documentos":      docs_02_valor,
+            "02_acta_visita":     acta2_valor,
+            "02_diagnostico":     diagnostico_valor,
+            "02_plan_negocio":    plan_valor,
             "02_alertas_por_doc": {
-                "02_ACTA_VISITA": alerta_acta2,
-                "02_DIAGNOSTICO": alerta_diagnostico,
-                "02_PLAN_NEGOCIO": alerta_plan,
+                "02_ACTA_VISITA":   alerta_acta2,
+                "02_DIAGNOSTICO":   alerta_diagnostico,
+                "02_PLAN_NEGOCIO":  alerta_plan,
             },
+            # Carpeta 03
+            "03_encuestas":    resultado_03.get("encuestas_valor",  "N/A"),
+            "03_grupal":       resultado_03.get("grupal_valor",     "N/A"),
+            "03_individual":   resultado_03.get("individual_valor", "N/A"),
+            "03_modulos":      resultado_03.get("modulos_valor",    "N/A"),
+            "03_asistencia":   resultado_03.get("asistencia_valor", "N/A"),
+            "03_alertas":      resultado_03.get("alertas", {}),
             "observaciones":   "; ".join(observaciones),
             "_tiene_error":    tiene_error,
         }
