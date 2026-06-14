@@ -3,3 +3,4 @@ __pycache__/
 descargas_sharepoint/
 jobs/
 .env
+.claude/

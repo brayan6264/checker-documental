@@ -26,6 +26,7 @@ _AZUL_OSC = "FF2E4A7A"   # encabezado de grupo (carpeta)
 _AZUL_MED = "FF4472C4"   # encabezado Identificación
 _VERDE    = "FF375623"   # encabezado 01 Visita
 _NARANJA  = "FF833C00"   # encabezado 00 Documentación
+_TEAL     = "FF1F5C6B"   # encabezado 03 Capacitación
 _GRIS     = "FF595959"   # encabezado General
 _ROJO     = "FFFF6B6B"
 _AMARILLO = "FFFFF59D"
@@ -46,35 +47,47 @@ ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 # ── Columnas ──────────────────────────────────────────────────────────────────
 
+_MORADO   = "FF5C3273"   # encabezado 02 Visita 2
+
 COLUMNAS = [
     # Identificación
     "ID_unico", "modalidad", "unidad_doc",
     # Carpeta 00_DOCUMENTACION
     "CEDULA", "COMERCIO", "RUT", "TENENCIA",
     # Carpeta 01_VISITA_1_CARACTERIZACION
-    "01_DOCUMENTOS",     # existencia de los 3 documentos
-    "01_FOTOS_VIDEOS",   # conteo de archivos multimedia
-    "ACTA_COMPROMISO",   # revisión del acta de compromiso
-    "ACTA_VISITA",       # revisión del acta de visita
-    "GESTOR",            # gestor extraído del acta de visita y verificado en BD
-    "TRATAMIENTO_DATOS", # revisión de autorización de tratamiento de datos
+    "01_DOCUMENTOS",
+    "01_FOTOS_VIDEOS",
+    "ACTA_COMPROMISO",
+    "ACTA_VISITA",
+    "GESTOR",
+    "TRATAMIENTO_DATOS",
     # Carpeta 02_VISITA_2_DIAGNOSTICO
-    "02_DOCUMENTOS",      # existencia de Acta 2, Diagnóstico y Plan de Negocio
-    "02_ACTA_VISITA",     # revisión del acta de visita 2
-    "02_DIAGNOSTICO",     # revisión del diagnóstico
-    "02_PLAN_NEGOCIO",    # validación del plan de negocio
+    "02_DOCUMENTOS",
+    "02_ACTA_VISITA",
+    "02_DIAGNOSTICO",
+    "02_PLAN_NEGOCIO",
+    # Carpeta 03 (Capacitación)
+    "03_ENCUESTAS",
+    "03_GRUPAL",
+    "03_INDIVIDUAL",
+    "03_MODULOS",
+    "03_ASISTENCIA",
     # General
     "observaciones",
 ]
 
 _ANCHOS_MIN = {
-    "ID_unico":          18, "modalidad":           10, "unidad_doc":      22,
-    "CEDULA":            18, "COMERCIO":            18, "RUT":             14,
+    "ID_unico":          18, "modalidad":       10, "unidad_doc":      22,
+    "CEDULA":            18, "COMERCIO":        18, "RUT":             14,
     "TENENCIA":          18,
-    "01_DOCUMENTOS":     38, "01_FOTOS_VIDEOS":     22,
-    "ACTA_COMPROMISO":   35, "ACTA_VISITA":         35,
-    "GESTOR":            40, "TRATAMIENTO_DATOS":   35,
-    "02_DOCUMENTOS":     35, "02_ACTA_VISITA":      35, "02_DIAGNOSTICO": 35, "02_PLAN_NEGOCIO": 35,
+    "01_DOCUMENTOS":     38, "01_FOTOS_VIDEOS": 22,
+    "ACTA_COMPROMISO":   35, "ACTA_VISITA":     35,
+    "GESTOR":            40, "TRATAMIENTO_DATOS": 35,
+    "02_DOCUMENTOS":     35, "02_ACTA_VISITA":  35,
+    "02_DIAGNOSTICO":    35, "02_PLAN_NEGOCIO": 35,
+    "03_ENCUESTAS":      25, "03_GRUPAL":       18,
+    "03_INDIVIDUAL":     18, "03_MODULOS":      50,
+    "03_ASISTENCIA":     55,
     "observaciones":     50,
 }
 
@@ -83,9 +96,9 @@ _COLS_00_IDX = {
     for doc in ("CEDULA", "COMERCIO", "RUT", "TENENCIA")
 }
 
-_COL_DOCS_IDX  = COLUMNAS.index("01_DOCUMENTOS")   + 1
-_COL_FOTOS_IDX = COLUMNAS.index("01_FOTOS_VIDEOS") + 1
-_COL_GESTOR_IDX = COLUMNAS.index("GESTOR")         + 1
+_COL_DOCS_IDX   = COLUMNAS.index("01_DOCUMENTOS")   + 1
+_COL_FOTOS_IDX  = COLUMNAS.index("01_FOTOS_VIDEOS") + 1
+_COL_GESTOR_IDX = COLUMNAS.index("GESTOR")          + 1
 _COLS_DOC_REV_IDX = {
     col: COLUMNAS.index(col) + 1
     for col in ("ACTA_COMPROMISO", "ACTA_VISITA", "GESTOR", "TRATAMIENTO_DATOS")
@@ -93,8 +106,11 @@ _COLS_DOC_REV_IDX = {
 _COL_DOCS2_IDX = COLUMNAS.index("02_DOCUMENTOS") + 1
 _COLS_DOC_REV2_IDX = {
     col: COLUMNAS.index(col) + 1
-    for col in ("02_ACTA_VISITA","02_DIAGNOSTICO", "02_PLAN_NEGOCIO",
-    )
+    for col in ("02_ACTA_VISITA", "02_DIAGNOSTICO", "02_PLAN_NEGOCIO")
+}
+_COLS_03_IDX = {
+    col: COLUMNAS.index(col) + 1
+    for col in ("03_ENCUESTAS", "03_GRUPAL", "03_INDIVIDUAL", "03_MODULOS", "03_ASISTENCIA")
 }
 
 # Orden y color de cada grupo-carpeta para la fila de encabezado superior
@@ -104,7 +120,10 @@ _GRUPOS_ORDEN = [
     ("01 Visita",        ["01_DOCUMENTOS", "01_FOTOS_VIDEOS",
                           "ACTA_COMPROMISO", "ACTA_VISITA", "GESTOR",
                           "TRATAMIENTO_DATOS"],                                    _VERDE),
-     ("02 Visita",        ["02_DOCUMENTOS", "02_ACTA_VISITA", "02_DIAGNOSTICO", "02_PLAN_NEGOCIO"], _VERDE),
+    ("02 Visita 2",      ["02_DOCUMENTOS", "02_ACTA_VISITA",
+                          "02_DIAGNOSTICO", "02_PLAN_NEGOCIO"],                   _MORADO),
+    ("03 Capacitación",  ["03_ENCUESTAS", "03_GRUPAL", "03_INDIVIDUAL",
+                          "03_MODULOS", "03_ASISTENCIA"],                          _TEAL),
     ("General",          ["observaciones"],                                        _GRIS),
 ]
 
@@ -156,6 +175,12 @@ class ChecklistWriter:
             resultado.get("02_acta_visita",     "N/A"),
             resultado.get("02_diagnostico",     "N/A"),
             resultado.get("02_plan_negocio",    "N/A"),
+            # 03
+            resultado.get("03_encuestas",       "N/A"),
+            resultado.get("03_grupal",          "N/A"),
+            resultado.get("03_individual",      "N/A"),
+            resultado.get("03_modulos",         "N/A"),
+            resultado.get("03_asistencia",      "N/A"),
             # General
             resultado.get("observaciones", ""),
         ]
@@ -168,7 +193,7 @@ class ChecklistWriter:
             celda.font      = FONT_NORMAL
             celda.alignment = ALIGN_CENTER
 
-        # Rojo en docs 00 ausentes
+        # Rojo en docs 00 ausentes; amarillo si cédula existe pero no coincide
         for doc, col_idx in _COLS_00_IDX.items():
             if docs_estado.get(doc) == Estado.FALTA:
                 celda      = self._ws.cell(row=fila_num, column=col_idx)
@@ -206,13 +231,27 @@ class ChecklistWriter:
             celda.fill = FILL_ROJO
             celda.font = FONT_FALTA
 
-        # Amarillo en cada columna de revisión si tiene alerta
+        # Amarillo en cada columna de revisión IA de 01 si tiene alerta
         alertas_por_col = resultado.get("01_alertas_por_doc", {})
         for col_nombre, col_idx in _COLS_DOC_REV_IDX.items():
             if alertas_por_col.get(col_nombre, False):
                 celda      = self._ws.cell(row=fila_num, column=col_idx)
                 celda.fill = FILL_AMARILLO
                 celda.font = FONT_IA_WARN
+
+        # Rojo/amarillo en columnas 03
+        alertas_03 = resultado.get("03_alertas", {})
+        for col_nombre, col_idx in _COLS_03_IDX.items():
+            if alertas_03.get(col_nombre, False):
+                val = str(valores[col_idx - 1])
+                if "FALTA" in val.upper():
+                    celda      = self._ws.cell(row=fila_num, column=col_idx)
+                    celda.fill = FILL_ROJO
+                    celda.font = FONT_FALTA
+                else:
+                    celda      = self._ws.cell(row=fila_num, column=col_idx)
+                    celda.fill = FILL_AMARILLO
+                    celda.font = FONT_IA_WARN
 
         # Amarillo en columnas de revisión de la carpeta 02
         alertas_por_col_02 = resultado.get("02_alertas_por_doc", {})

@@ -64,6 +64,17 @@ PALABRAS_CLAVE: Dict[str, list] = {
 # Orden canónico de columnas en el checklist (carpeta 00).
 DOCUMENTOS_ORDEN = ["CEDULA", "COMERCIO", "RUT", "TENENCIA"]
 
+# Si un archivo contiene el valor de unidad_doc en su nombre, se clasifica
+# como este tipo de documento según la modalidad.
+# M1/M2: persona natural → cédula es el identificador → CEDULA
+# M3/M4: empresa/comercio → NIT es el identificador → RUT
+UNIDAD_DOC_TIPO: Dict[str, str] = {
+    "M1": "CEDULA",
+    "M2": "CEDULA",
+    "M3": "RUT",
+    "M4": "RUT",
+}
+
 # ── Carpeta 01_VISITA_1_CARACTERIZACION ───────────────────────────────────────
 
 # Palabras clave para identificar los 3 documentos obligatorios de la visita.
@@ -98,6 +109,14 @@ EXTENSIONES_MEDIA = {
 }
 
 MIN_ARCHIVOS_MEDIA = 4  # mínimo 4 fotos o videos obligatorios
+
+# Mínimo de encuestas requeridas por modalidad en la carpeta 03
+MIN_ASISTENTES_03: Dict[str, int] = {
+    "M1": 1,
+    "M2": 3,
+    "M3": 5,
+    "M4": 5,
+}
 
 
 # ── Lógica de evaluación ──────────────────────────────────────────────────────

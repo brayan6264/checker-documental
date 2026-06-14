@@ -5,6 +5,7 @@ Gestiona el ciclo de vida de los trabajos (job): inicio, estado y descarga del r
 
 import asyncio
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict
@@ -102,8 +103,10 @@ async def descargar_resultado(job_id: str):
 # ── Función de fondo ──────────────────────────────────────────────────────────
 
 def _ejecutar_validacion(job_id: str, ruta_entrada: str, ruta_checklist: str) -> None:
+    t0 = time.perf_counter()
     try:
-        _jobs[job_id]["estado"] = "procesando"
+        _jobs[job_id]["estado"]      = "procesando"
+        _jobs[job_id]["inicio_utc"]  = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
         def _progreso(procesadas: int, total: int, errores: int) -> None:
             _jobs[job_id]["filas_procesadas"] = procesadas
@@ -115,13 +118,32 @@ def _ejecutar_validacion(job_id: str, ruta_entrada: str, ruta_checklist: str) ->
             callback_progreso=_progreso,
         ).procesar_matriz(ruta_entrada)
 
-        _jobs[job_id]["estado"] = "completado"
-        logger.info("Job %s: completado.", job_id)
+        elapsed = time.perf_counter() - t0
+        _jobs[job_id]["estado"]           = "completado"
+        _jobs[job_id]["duracion_segundos"] = round(elapsed, 1)
+        logger.info(
+            "Job %s: completado en %s.",
+            job_id, _fmt_duracion(elapsed),
+        )
 
     except Exception as exc:
-        logger.exception("Job %s: error fatal: %s", job_id, exc)
-        _jobs[job_id]["estado"]    = "error"
-        _jobs[job_id]["error_msg"] = str(exc)
+        elapsed = time.perf_counter() - t0
+        logger.exception("Job %s: error fatal tras %s: %s", job_id, _fmt_duracion(elapsed), exc)
+        _jobs[job_id]["estado"]            = "error"
+        _jobs[job_id]["error_msg"]         = str(exc)
+        _jobs[job_id]["duracion_segundos"] = round(elapsed, 1)
+
+
+def _fmt_duracion(segundos: float) -> str:
+    """Formatea segundos como '1h 23m 45s' o '2m 03s' o '45.3s'."""
+    s = int(segundos)
+    h, rem = divmod(s, 3600)
+    m, seg = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {seg:02d}s"
+    if m:
+        return f"{m}m {seg:02d}s"
+    return f"{segundos:.1f}s"
 
 
 def _verificar_job(job_id: str) -> None:
