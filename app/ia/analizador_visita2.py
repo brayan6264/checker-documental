@@ -9,6 +9,7 @@ Analizadores de documentos de la carpeta
 import logging
 from pathlib import Path
 from typing import Dict, List
+from app.core.normalizacion import normalizar
 
 import openpyxl
 
@@ -33,28 +34,91 @@ logger = logging.getLogger(__name__)
 # PLAN DE NEGOCIO
 # ──────────────────────────────────────────────────────────────────────────────
 
-CAMPOS_CONTROL = {
-    "D11": "Nombre Unidad Productiva",
-    "D12": "Nombre representante",
-    "D15": "Celular",
-    "D17": "Actividad económica principal",
-    "D19": "Necesidad o problema que atiende",
-    "D22": "Principales clientes",
-    "D23": "Clientes a los que quiere llegar",
-    "E26": "Acción de alianza",
-    "C31": "Fortaleza",
-    "E31": "Oportunidad",
-    "C36": "Debilidad",
-    "E36": "Amenaza",
-    "B42": "Objetivo del plan",
-    "D44": "Acción administrativa",
-    "D46": "Acción productiva",
-    "B55": "Tema asistencia técnica",
-    "D55": "Modalidad educativa",
-    "D60": "Pertenece a organización",
-    "D64": "Interés en participar",
-}
+CAMPOS_CONTROL = [
+    "Nombre Unidad Productiva",
+    "Nombre representante",
+    "Celular",
+    "Actividad económica principal",
+    "Necesidad o problema que atiende",
+    "Principales clientes",
+    "Clientes a los que quiere llegar",
+    "Acción de alianza",
+    "Fortaleza",
+    "Oportunidad",
+    "Debilidad",
+    "Amenaza",
+    "Objetivo del plan",
+    "Acción administrativa",
+    "Acción productiva",
+    "Tema asistencia técnica",
+    "Modalidad educativa",
+    "Pertenece a organización",
+    "Interés en participar",
+]
 
+
+def buscar_valor_derecha(ws, etiqueta):
+    """
+    Busca una etiqueta dentro de la hoja y retorna
+    el primer valor encontrado.
+
+    Estrategia:
+    1. Buscar la etiqueta normalizada.
+    2. Buscar contenido a la derecha.
+    3. Si no existe, buscar contenido debajo.
+    """
+
+    etiqueta_norm = normalizar(etiqueta)
+
+    for fila in ws.iter_rows():
+
+        for celda in fila:
+
+            if celda.value is None:
+                continue
+
+            texto = normalizar(str(celda.value))
+
+            if etiqueta_norm in texto:
+
+                fila_idx = celda.row
+                col_idx = celda.column
+
+                # ── Buscar hacia la derecha ──────────────────────────────
+                for c in range(col_idx + 1, col_idx + 6):
+
+                    valor = ws.cell(
+                        row=fila_idx,
+                        column=c,
+                    ).value
+
+                    if valor is None:
+                        continue
+
+                    if isinstance(valor, str) and not valor.strip():
+                        continue
+
+                    return valor
+
+                # ── Buscar hacia abajo ──────────────────────────────────
+                for r in range(fila_idx + 1, fila_idx + 4):
+
+                    valor = ws.cell(
+                        row=r,
+                        column=col_idx,
+                    ).value
+
+                    if valor is None:
+                        continue
+
+                    if isinstance(valor, str) and not valor.strip():
+                        continue
+
+                    return valor
+
+                return None
+
+    return None
 
 def analizar_plan_negocio(ruta_excel: str) -> Dict[str, object]:
     """
@@ -71,15 +135,15 @@ def analizar_plan_negocio(ruta_excel: str) -> Dict[str, object]:
 
         ws = wb.worksheets[0]
 
-        for celda, descripcion in CAMPOS_CONTROL.items():
-            valor = ws[celda].value
-
+        for etiqueta in CAMPOS_CONTROL:
+            valor = buscar_valor_derecha(
+                ws,
+                etiqueta,
+            )
             if valor is None:
-                faltantes.append(f"{celda} - {descripcion}")
-                continue
-
-            if isinstance(valor, str) and not valor.strip():
-                faltantes.append(f"{celda} - {descripcion}")
+                faltantes.append(
+                    etiqueta
+                )
 
         wb.close()
 
