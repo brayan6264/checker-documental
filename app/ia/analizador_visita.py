@@ -61,6 +61,7 @@ def _pdf_a_imagenes_b64(ruta: Path, max_paginas: int) -> list[str]:
         return []
 
     try:
+        
         doc     = fitz.open(str(ruta))
         n       = len(doc)
         mitad   = max_paginas // 2
