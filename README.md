@@ -133,104 +133,212 @@ python server.py --port 9000       # puerto personalizado
 
 ---
 
-## Probar desde Swagger
+## Uso de la API desde Swagger UI
 
-### 1. Abrir Swagger UI
+Swagger UI es la interfaz visual integrada que permite ejecutar todos los endpoints sin escribir código ni usar Postman.
 
-Navegar a:
+### Flujo completo de una validación
+
+```
+ PASO 1          PASO 2              PASO 3            PASO 4          PASO 5
+Abrir Swagger → Subir matriz.xlsx → Copiar job_id → Consultar estado → Descargar checklist
+   /docs         POST /validar        (respuesta)     GET /estado/{id}   GET /resultado/{id}
+```
+
+---
+
+### PASO 1 — Abrir Swagger UI
+
+Con el servidor corriendo (`python server.py`), abrir en el navegador:
+
 ```
 http://127.0.0.1:8000/docs
 ```
 
----
+Verás una pantalla similar a esta:
 
-### 2. Verificar que el servidor está vivo
-
-**`GET /health`**
-
-1. Hacer clic en `GET /health` → **Try it out** → **Execute**
-2. Respuesta esperada:
-```json
-{
-  "status": "ok",
-  "version": "2.0.0"
-}
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Validador Documental SharePoint   OAS 3.0                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ▼  validacion                                                  │
+│  ├── POST  /validacion/validar      Lanzar validación           │
+│  ├── GET   /validacion/estado/{id}  Consultar progreso          │
+│  └── GET   /validacion/resultado/{id} Descargar checklist       │
+│                                                                 │
+│  ▼  descarga                                                    │
+│  └── POST  /descarga/descargar      Probar descarga SharePoint  │
+│                                                                 │
+│  ▼  default                                                     │
+│  └── GET   /health                  Estado del servidor         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
+> **Tip:** Antes de todo, verificar que el servidor responde ejecutando `GET /health`. Debe retornar `{"status": "ok"}`.
+
 ---
 
-### 3. Lanzar una validación
+### PASO 2 — Lanzar una validación
 
 **`POST /validacion/validar`**
 
-1. Hacer clic en `POST /validacion/validar` → **Try it out**
-2. En el campo `archivo` hacer clic en **Choose File** y seleccionar el Excel de la matriz
-3. Hacer clic en **Execute**
-4. La respuesta llega inmediatamente (el proceso corre en background):
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ POST /validacion/validar                            [ Try it out]│
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Request body     multipart/form-data                           │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ archivo  [  matriz.xlsx          ] [Choose File]          │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│                                          [ Clear ]  [ Execute ] │
+└─────────────────────────────────────────────────────────────────┘
+```
 
+**Pasos:**
+1. Clic en `POST /validacion/validar` para expandir el endpoint
+2. Clic en **Try it out** (esquina superior derecha del endpoint)
+3. Clic en **Choose File** → seleccionar el archivo Excel de la matriz
+4. Clic en **Execute**
+
+**Respuesta esperada (HTTP 200):**
 ```json
 {
-  "job_id": "abc123...",
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "estado": "iniciado",
-  "estado_url": "/validacion/estado/abc123...",
-  "resultado_url": "/validacion/resultado/abc123..."
+  "mensaje": "Validación iniciada en background",
+  "estado_url": "/validacion/estado/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "resultado_url": "/validacion/resultado/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 }
 ```
 
-> Copiar el `job_id` para los siguientes pasos.
+> ⚠️ **Importante:** el proceso corre en **background** — la respuesta llega en menos de 1 segundo aunque la validación tarde varios minutos. **Copiar el `job_id`** para los pasos siguientes.
 
 ---
 
-### 4. Consultar el progreso
+### PASO 3 — Consultar el progreso
 
 **`GET /validacion/estado/{job_id}`**
 
-1. Hacer clic en `GET /validacion/estado/{job_id}` → **Try it out**
-2. Pegar el `job_id` copiado en el paso anterior
-3. Hacer clic en **Execute**
-4. Respuesta durante el proceso:
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ GET /validacion/estado/{job_id}                     [ Try it out]│
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Parameters                                                     │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ job_id *  a1b2c3d4-e5f6-7890-abcd-ef1234567890           │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│                                          [ Clear ]  [ Execute ] │
+└─────────────────────────────────────────────────────────────────┘
+```
 
+**Pasos:**
+1. Clic en `GET /validacion/estado/{job_id}` para expandir
+2. Clic en **Try it out**
+3. En el campo `job_id` pegar el ID copiado en el Paso 2
+4. Clic en **Execute**
+5. **Repetir hasta que `estado` sea `"completado"`**
+
+**Respuesta mientras procesa:**
 ```json
 {
+  "job_id": "a1b2c3d4-...",
   "estado": "procesando",
-  "filas_total": 4,
-  "filas_procesadas": 2,
-  "errores": 0,
-  "ruta_checklist": "jobs/abc123.../checklist.xlsx"
+  "filas_total": 120,
+  "filas_procesadas": 47,
+  "errores": 2,
+  "inicio_utc": "2025-06-13T14:32:10Z",
+  "duracion_segundos": 83.4
 }
 ```
 
-5. Cuando `estado` sea `"completado"`, el checklist está listo.
+**Respuesta al finalizar:**
+```json
+{
+  "job_id": "a1b2c3d4-...",
+  "estado": "completado",
+  "filas_total": 120,
+  "filas_procesadas": 120,
+  "errores": 5,
+  "inicio_utc": "2025-06-13T14:32:10Z",
+  "duracion_segundos": 312.7
+}
+```
 
-**Estados posibles:** `iniciado` → `procesando` → `completado` / `error`
+**Ciclo de vida del estado:**
+
+```
+  [iniciado] ──► [procesando] ──► [completado]
+                      │
+                      └──────────► [error]  ← si falla algo crítico
+```
+
+| Estado       | Significado                                        |
+|--------------|----------------------------------------------------|
+| `iniciado`   | Job registrado, aún no comenzó a procesar filas    |
+| `procesando` | Validando filas, ver `filas_procesadas` para avance|
+| `completado` | Todas las filas procesadas, checklist disponible   |
+| `error`      | Falla crítica (archivo inválido, SharePoint caído) |
 
 ---
 
-### 5. Descargar el checklist
+### PASO 4 — Descargar el checklist
 
 **`GET /validacion/resultado/{job_id}`**
 
-1. Hacer clic en `GET /validacion/resultado/{job_id}` → **Try it out**
-2. Pegar el `job_id`
-3. Hacer clic en **Execute**
-4. Hacer clic en **Download file** para guardar el Excel `checklist_validacion.xlsx`
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ GET /validacion/resultado/{job_id}                  [ Try it out]│
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Parameters                                                     │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ job_id *  a1b2c3d4-e5f6-7890-abcd-ef1234567890           │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│                                          [ Clear ]  [ Execute ] │
+├─────────────────────────────────────────────────────────────────┤
+│ Response body                                                   │
+│                                                                 │
+│  [Download file]  ← hacer clic aquí para guardar el Excel      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Pasos:**
+1. Clic en `GET /validacion/resultado/{job_id}` para expandir
+2. Clic en **Try it out**
+3. Pegar el `job_id`
+4. Clic en **Execute**
+5. En la sección **Response body**, hacer clic en **Download file**
+6. Guardar el archivo `checklist_validacion.xlsx`
+
+> Solo disponible cuando el estado es `"completado"`. Si se llama antes, retorna HTTP 404.
 
 ---
 
-### 6. (Opcional) Probar solo la descarga de una carpeta
+### (Opcional) Probar la conexión con SharePoint antes de procesar
 
 **`POST /descarga/descargar`**
 
-Útil para verificar que la conexión con SharePoint funciona antes de procesar la matriz completa.
+Útil para verificar que una URL de SharePoint es accesible y los archivos se descargan correctamente, **antes** de correr la validación completa.
 
-1. Hacer clic en `POST /descarga/descargar` → **Try it out**
-2. Pegar el body:
+**Pasos:**
+1. Clic en `POST /descarga/descargar` → **Try it out**
+2. En el campo `Request body`, pegar:
 ```json
 {
-  "url": "https://...sharepoint.com/:f:/s/..."
+  "url": "https://tuorganizacion.sharepoint.com/:f:/s/Sitio/XXXX"
 }
 ```
-3. Respuesta:
+3. Clic en **Execute**
+
+**Respuesta esperada:**
 ```json
 {
   "ruta_local": "C:\\...\\descargas_sharepoint\\uuid\\00_DOCUMENTACION",
@@ -239,6 +347,19 @@ http://127.0.0.1:8000/docs
   "fallidos": 0
 }
 ```
+
+Si `fallidos > 0` o aparece error 401/403, la URL de SharePoint no tiene permisos de acceso anónimo.
+
+---
+
+### Errores comunes en Swagger
+
+| Error HTTP | Causa más probable | Qué hacer |
+|---|---|---|
+| `422 Unprocessable Entity` | El Excel tiene columnas faltantes o nombre incorrecto | Verificar que las columnas coincidan con la tabla de [Columnas del Excel de entrada](#columnas-del-excel-de-entrada-matriz) |
+| `404 Not Found` en `/resultado` | El job aún no terminó | Esperar a que `/estado` devuelva `"completado"` |
+| `500 Internal Server Error` | Error en el servidor | Revisar la consola donde corre `python server.py` |
+| `0 filas procesadas` en `/estado` | El Excel está vacío o la primera fila no es de datos | Verificar que la hoja activa tenga datos desde la fila 2 |
 
 ---
 
@@ -270,29 +391,38 @@ Copiar `.env.example` a `.env` y ajustar según el entorno:
 | `MAX_WORKERS_LISTADO`   | `8`                        | Hilos paralelos para listar carpetas         |
 | `MAX_WORKERS_DESCARGA`  | `12`                       | Hilos paralelos para descargar archivos      |
 | `CHECKLIST_LOTE_GUARDADO` | `50`                     | Filas antes de persistir el checklist a disco|
-| `IA_HABILITADO`         | `false`                    | Activa validación semántica con IA           |
-| `ANTHROPIC_API_KEY`     | *(vacío)*                  | API key de Anthropic (solo si IA_HABILITADO) |
-| `IA_MODEL`              | `claude-haiku-4-5-20251001`| Modelo a usar para análisis de documentos    |
+| `IA_HABILITADO`         | `false`                    | Activa validación semántica con IA (OpenAI)  |
+| `OPENAI_API_KEY`        | *(vacío)*                  | API key de OpenAI (requerida si IA_HABILITADO=true) |
+| `OPENAI_MODEL`          | `gpt-4o`                   | Modelo OpenAI para análisis visual de documentos |
 
 ---
 
-## Módulo de IA (fase futura)
+## Módulo de IA
 
-El módulo `app/ia/` está preparado pero desactivado por defecto (`IA_HABILITADO=false`).
+El análisis con IA está desactivado por defecto (`IA_HABILITADO=false`). Cuando se activa, complementa la validación por nombre de archivo con revisión del **contenido** de los documentos usando GPT-4o con visión.
 
-Cuando se active, complementa la validación por nombre de archivo con validación **semántica**:
-- **Fase 1 (activa):** ¿existe un archivo cuyo nombre contiene "cedula"?
-- **Fase 2 (IA):** ¿el contenido de ese archivo ES realmente una cédula?
+**Qué analiza la IA por carpeta:**
 
-Para activarlo:
+| Carpeta | Documento | Qué verifica |
+|---------|-----------|--------------|
+| 01 Visita 1 | Acta de Compromiso | Firmas, fechas, datos del gestor |
+| 01 Visita 1 | Acta de Visita | Extrae nombre y cédula del gestor para verificar en BD |
+| 01 Visita 1 | Tratamiento de Datos | Autorización firmada presente |
+| 02 Visita 2 | Acta de Visita 2 | Contenido y firmas |
+| 02 Visita 2 | Diagnóstico | Documento completo y coherente |
+| 02 Visita 2 | Plan de Negocio | Campos obligatorios completados |
+| 03 Capacitación | TX_RX por módulo | Nombres de encuestas presentes en lista de asistencia |
+
+**Para activarla:**
 ```env
 IA_HABILITADO=true
-ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...tu-key-de-openai...
+OPENAI_MODEL=gpt-4o
 ```
 
-Instalar dependencias adicionales según los formatos a analizar:
+Las dependencias ya están en `requirements.txt`. Si faltaran:
 ```bash
-pip install anthropic pymupdf pillow
+pip install openai pymupdf pillow
 ```
 
 ---
