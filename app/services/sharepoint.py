@@ -33,6 +33,7 @@ from app.config import (
     DOWNLOADS_DIR,
     MAX_WORKERS_DESCARGA,
     MAX_WORKERS_LISTADO,
+    TIMEOUT_DESCARGA,
 )
 from app.core.normalizacion import normalizar
 
@@ -67,7 +68,7 @@ def resolver(sess: requests.Session, url: str) -> tuple[str, str, str]:
     Las cookies de sesión anónima quedan guardadas en `sess`.
     Retorna: (host, web_raiz, ruta_relativa)
     """
-    r = sess.get(url, allow_redirects=True, timeout=60)
+    r = sess.get(url, allow_redirects=True, timeout=TIMEOUT_DESCARGA)
     r.raise_for_status()
 
     final = urllib.parse.urlparse(r.url)
@@ -98,7 +99,7 @@ def _listar_carpeta(
         f"?$expand=Folders,Files"
         f"&$select=Folders/ServerRelativeUrl,Files/ServerRelativeUrl"
     )
-    r = sess.get(api, headers={"Accept": "application/json;odata=verbose"}, timeout=60)
+    r = sess.get(api, headers={"Accept": "application/json;odata=verbose"}, timeout=TIMEOUT_DESCARGA)
 
     if r.status_code != 200:
         raise RuntimeError(f"API REST {r.status_code}: {r.text[:300]}")
@@ -208,7 +209,7 @@ def _bajar_archivo(
     for intento in range(3):
         try:
             logger.debug("  → %s", nombre)
-            with sess.get(url, stream=True, timeout=(30, 60)) as r:
+            with sess.get(url, stream=True, timeout=(30, TIMEOUT_DESCARGA)) as r:
                 r.raise_for_status()
                 with open(destino, "wb") as fh:
                     for chunk in r.iter_content(CHUNK_SIZE):
