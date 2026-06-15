@@ -108,6 +108,7 @@ class ValidadorDocumental:
         ya_procesados = checklist.ids_procesados()
         procesadas    = len(ya_procesados)
         errores       = 0
+        filas_omitidas: list[dict] = []   # filas que fallaron por timeout/error crítico
 
         if ya_procesados:
             logger.info("Reanudando: %d filas ya procesadas.", procesadas)
@@ -121,27 +122,75 @@ class ValidadorDocumental:
 
             logger.info("[%d/%d] ID: %s", procesadas + 1, total, id_unico)
             t_fila = time.perf_counter()
-            resultado = self._procesar_fila(fila)
-            elapsed_fila = time.perf_counter() - t_fila
 
-            if resultado.get("_tiene_error"):
+            try:
+                resultado = self._procesar_fila(fila)
+                elapsed_fila = time.perf_counter() - t_fila
+
+                if resultado.get("_tiene_error"):
+                    errores += 1
+                    logger.warning("  Alerta: %s", resultado.get("observaciones"))
+
+                logger.info("  [%s] Fila procesada en %.1fs", id_unico, elapsed_fila)
+                checklist.agregar_fila(resultado)
+                procesadas += 1
+
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                elapsed_fila = time.perf_counter() - t_fila
+                logger.error(
+                    "  [%s] TIMEOUT/RED tras %.1fs — omitida: %s",
+                    id_unico, elapsed_fila, exc,
+                )
+                filas_omitidas.append(fila.to_dict())
                 errores += 1
-                logger.warning("  Alerta: %s", resultado.get("observaciones"))
+                # Limpiar temporales si quedaron
+                dest_base = DOWNLOADS_DIR / id_unico
+                if dest_base.exists():
+                    try:
+                        shutil.rmtree(dest_base)
+                    except Exception:
+                        pass
 
-            logger.info("  [%s] Fila procesada en %.1fs", id_unico, elapsed_fila)
-            checklist.agregar_fila(resultado)
-            procesadas += 1
+            except Exception as exc:
+                elapsed_fila = time.perf_counter() - t_fila
+                logger.error(
+                    "  [%s] ERROR CRÍTICO tras %.1fs — omitida: %s",
+                    id_unico, elapsed_fila, exc,
+                )
+                filas_omitidas.append(fila.to_dict())
+                errores += 1
+                dest_base = DOWNLOADS_DIR / id_unico
+                if dest_base.exists():
+                    try:
+                        shutil.rmtree(dest_base)
+                    except Exception:
+                        pass
 
             if self.callback_progreso:
                 self.callback_progreso(procesadas, total, errores)
 
         checklist.guardar()
+
+        # Guardar pendientes si hubo omisiones
+        ruta_pendientes = None
+        if filas_omitidas:
+            ruta_pendientes = str(self.ruta_checklist).replace("checklist.xlsx", "pendientes.xlsx")
+            self._guardar_pendientes(filas_omitidas, ruta_pendientes)
+            logger.warning(
+                "%d fila(s) omitidas por error/timeout → %s",
+                len(filas_omitidas), ruta_pendientes,
+            )
+
         elapsed_total = time.perf_counter() - t_inicio
         promedio = elapsed_total / procesadas if procesadas else 0
         logger.info(
-            "Terminado. %d/%d filas | %d alertas | tiempo total: %.1fs | promedio por fila: %.1fs",
-            procesadas, total, errores, elapsed_total, promedio,
+            "Terminado. %d/%d filas | %d alertas | %d omitidas | total: %.1fs | prom: %.1fs",
+            procesadas, total, errores, len(filas_omitidas), elapsed_total, promedio,
         )
+        return {
+            "filas_omitidas":   len(filas_omitidas),
+            "ruta_pendientes":  ruta_pendientes,
+        }
 
     # ── Procesamiento de una fila ─────────────────────────────────────────────
 
@@ -815,6 +864,56 @@ class ValidadorDocumental:
         }
 
 
+
+    # ── Filas pendientes (omitidas por timeout / error crítico) ──────────────────
+
+    @staticmethod
+    def _guardar_pendientes(filas: list[dict], ruta: str) -> None:
+        """Genera un Excel con las filas que no se procesaron para reintento manual."""
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Pendientes"
+
+        if not filas:
+            wb.save(ruta)
+            return
+
+        columnas = list(filas[0].keys())
+
+        fill_h = PatternFill(start_color="FF833C00", end_color="FF833C00", fill_type="solid")
+        font_h = Font(name="Arial", size=9, bold=True, color="FFFFFFFF")
+        alin_c = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        for col_idx, col_nombre in enumerate(columnas, start=1):
+            c = ws.cell(row=1, column=col_idx, value=col_nombre)
+            c.fill = fill_h
+            c.font = font_h
+            c.alignment = alin_c
+        ws.row_dimensions[1].height = 22
+
+        font_n = Font(name="Arial", size=9)
+        for fila_idx, fila in enumerate(filas, start=2):
+            for col_idx, col_nombre in enumerate(columnas, start=1):
+                val = fila.get(col_nombre, "")
+                if isinstance(val, float) and str(val) == "nan":
+                    val = ""
+                c = ws.cell(row=fila_idx, column=col_idx, value=val)
+                c.font = font_n
+                c.alignment = alin_c
+
+        for col_idx, col_nombre in enumerate(columnas, start=1):
+            max_ancho = max(len(str(col_nombre)), 12)
+            for fila in filas:
+                v = str(fila.get(col_nombre, "") or "")
+                if len(v) > max_ancho:
+                    max_ancho = len(v)
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_ancho + 2, 60)
+
+        ws.freeze_panes = "A2"
+        wb.save(ruta)
 
     # ── Carga de la matriz ────────────────────────────────────────────────────
 

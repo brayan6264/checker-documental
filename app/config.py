@@ -27,7 +27,7 @@ CHUNK_SIZE           = 4 * 1024 * 1024   # 4 MB
 
 # ── Validación ────────────────────────────────────────────────────────────────
 CHECKLIST_LOTE_GUARDADO = int(os.getenv("CHECKLIST_LOTE_GUARDADO", "50"))
-TIMEOUT_DESCARGA        = int(os.getenv("TIMEOUT_DESCARGA", "300"))
+TIMEOUT_DESCARGA        = int(os.getenv("TIMEOUT_DESCARGA", "120"))
 
 # ── Análisis IA (OpenAI) ──────────────────────────────────────────────────────
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
