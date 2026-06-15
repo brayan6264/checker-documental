@@ -24,6 +24,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import socket
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -42,6 +43,11 @@ logger = logging.getLogger(__name__)
 
 # ── Creación de sesión ────────────────────────────────────────────────────────
 
+# Timeout global de socket: evita que iter_content se quede pegado entre chunks
+# aunque requests no lo detecte. Aplica a todas las conexiones del proceso.
+socket.setdefaulttimeout(TIMEOUT_DESCARGA)
+
+
 def _nueva_sesion() -> requests.Session:
     s = requests.Session()
     s.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -50,7 +56,7 @@ def _nueva_sesion() -> requests.Session:
         pool_maxsize=MAX_WORKERS_DESCARGA + MAX_WORKERS_LISTADO + 4,
         max_retries=Retry(
             total=3,
-            backoff_factor=1.0,
+            backoff_factor=2.0,
             status_forcelist={500, 502, 503, 504},
             allowed_methods={"GET"},
         ),
@@ -206,15 +212,25 @@ def _bajar_archivo(
     url    = f"https://{host}{urllib.parse.quote(srel, safe='/')}"
     destino.parent.mkdir(parents=True, exist_ok=True)
 
+    # Timeout por chunk: si no llega ningún byte en CHUNK_STALL_TIMEOUT segundos
+    # durante la descarga, se considera bloqueo y se reintenta.
+    CHUNK_STALL_TIMEOUT = 60
+
     for intento in range(3):
         try:
             logger.debug("  → %s", nombre)
             with sess.get(url, stream=True, timeout=(30, TIMEOUT_DESCARGA)) as r:
                 r.raise_for_status()
                 with open(destino, "wb") as fh:
+                    deadline = time.monotonic() + CHUNK_STALL_TIMEOUT
                     for chunk in r.iter_content(CHUNK_SIZE):
                         if chunk:
                             fh.write(chunk)
+                            deadline = time.monotonic() + CHUNK_STALL_TIMEOUT
+                        elif time.monotonic() > deadline:
+                            raise TimeoutError(
+                                f"Sin datos por más de {CHUNK_STALL_TIMEOUT}s (posible bloqueo)"
+                            )
             size = destino.stat().st_size
             logger.debug("  ✓ %s (%.1f KB)", nombre, size / 1024)
             return size
@@ -222,7 +238,7 @@ def _bajar_archivo(
             logger.warning("Reintento %d/3 — %s: %s", intento + 1, nombre, exc)
             if destino.exists():
                 destino.unlink(missing_ok=True)
-            time.sleep(1 << intento)
+            time.sleep(2 ** intento)  # 1s, 2s, 4s
 
     logger.error("Fallo definitivo: %s", nombre)
     return -1
