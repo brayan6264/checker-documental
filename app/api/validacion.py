@@ -139,6 +139,37 @@ async def descargar_resultado(job_id: str):
     )
 
 
+@router.get(
+    "/pendientes/{job_id}",
+    summary="Descarga el Excel de filas omitidas por timeout o error",
+    response_class=FileResponse,
+)
+async def descargar_pendientes(job_id: str):
+    """
+    Disponible solo si hubo filas omitidas durante el procesamiento.
+    Retorna un Excel con las mismas columnas de la matriz de entrada,
+    listo para volver a subir como nueva matriz y reprocesar.
+    """
+    _verificar_job(job_id)
+    job = _jobs[job_id]
+
+    if job["estado"] not in ("completado", "error"):
+        raise HTTPException(status_code=400, detail="El trabajo aún no terminó.")
+
+    ruta_pendientes = job.get("ruta_pendientes")
+    if not ruta_pendientes or not Path(ruta_pendientes).exists():
+        raise HTTPException(
+            status_code=404,
+            detail="No hay filas pendientes para este trabajo (todas se procesaron correctamente).",
+        )
+
+    return FileResponse(
+        ruta_pendientes,
+        filename="pendientes_reintento.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 # ── Función de fondo ──────────────────────────────────────────────────────────
 
 def _ejecutar_validacion(
@@ -157,18 +188,20 @@ def _ejecutar_validacion(
             _jobs[job_id]["filas_total"]      = total
             _jobs[job_id]["errores"]          = errores
 
-        ValidadorDocumental(
+        resumen = ValidadorDocumental(
             ruta_checklist=ruta_checklist,
             callback_progreso=_progreso,
             flujos=flujos,
         ).procesar_matriz(ruta_entrada)
 
         elapsed = time.perf_counter() - t0
-        _jobs[job_id]["estado"]           = "completado"
+        _jobs[job_id]["estado"]            = "completado"
         _jobs[job_id]["duracion_segundos"] = round(elapsed, 1)
+        _jobs[job_id]["filas_omitidas"]    = resumen.get("filas_omitidas", 0) if resumen else 0
+        _jobs[job_id]["ruta_pendientes"]   = resumen.get("ruta_pendientes") if resumen else None
         logger.info(
-            "Job %s: completado en %s.",
-            job_id, _fmt_duracion(elapsed),
+            "Job %s: completado en %s. Omitidas: %d",
+            job_id, _fmt_duracion(elapsed), _jobs[job_id]["filas_omitidas"],
         )
 
     except Exception as exc:
