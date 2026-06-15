@@ -39,7 +39,7 @@ def main() -> None:
 
     print(f"Matriz:    {ruta_excel}")
     print(f"Checklist: {ruta_checklist}")
-    print("─" * 50)
+    print("-" * 50)
 
     def _progreso(procesadas: int, total: int, errores: int) -> None:
         print(f"\r  {procesadas}/{total} filas  |  {errores} alertas", end="", flush=True)

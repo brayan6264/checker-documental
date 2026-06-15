@@ -287,20 +287,20 @@ def _descargar_arbol(
 
 def descargar_carpeta_doc(url: str, dest_base: Path | None = None) -> tuple[Path | None, dict]:
     """
-    Función principal del flujo de validación.
+    Valida la carpeta 00_DOCUMENTACION SIN descargar archivos.
 
-    1. Resuelve la URL y obtiene cookies de sesión.
-    2. Busca la subcarpeta 00_DOCUMENTACION en SharePoint (sin descargar nada más).
-    3. Descarga SOLO esa subcarpeta.
+    Solo lista los nombres de archivo en SharePoint para detectar
+    CEDULA / RUT / COMERCIO / TENENCIA por nombre — no se descarga
+    ningún archivo, evitando timeouts con imágenes pesadas.
 
-    Esto evita descargar carpetas irrelevantes (fotos de visita, caracterización, etc.)
-    que pueden ser pesadas y no aportan nada a la validación documental.
+    Escribe un archivo .txt con los nombres encontrados para que
+    _listar_archivos y _detectar_documentos puedan trabajar normalmente.
 
     Returns:
         (ruta_local_doc, stats) — ruta_local_doc es None si no se encontró la carpeta.
     """
-    dest_base  = dest_base or DOWNLOADS_DIR / str(uuid.uuid4())
-    sess       = _nueva_sesion()
+    dest_base = dest_base or DOWNLOADS_DIR / str(uuid.uuid4())
+    sess      = _nueva_sesion()
 
     host, web, rel_raiz = resolver(sess, url)
 
@@ -312,12 +312,30 @@ def descargar_carpeta_doc(url: str, dest_base: Path | None = None) -> tuple[Path
         return None, {"total": 0, "exitosos": 0, "fallidos": 0}
 
     logger.info("Carpeta doc encontrada: %s", rel_doc)
+
+    # Listar archivos sin descargar (solo nombres)
+    try:
+        _, archivos_srel = _listar_carpeta(sess, host, web, rel_doc)
+    except Exception as exc:
+        logger.warning("Error listando 00_DOCUMENTACION '%s': %s", rel_doc, exc)
+        return None, {"total": 0, "exitosos": 0, "fallidos": 0}
+
+    # Crear carpeta local con archivos "fantasma" (tamaño 0) que solo sirven
+    # para que _listar_archivos detecte los nombres
     nombre_doc = urllib.parse.unquote(rel_doc.rstrip("/").split("/")[-1])
     ruta_local = dest_base / nombre_doc
     ruta_local.mkdir(parents=True, exist_ok=True)
 
-    stats = _descargar_arbol(sess, host, web, rel_doc, ruta_local)
-    return ruta_local, stats
+    total = len(archivos_srel)
+    for srel in archivos_srel:
+        nombre_archivo = urllib.parse.unquote(srel.rstrip("/").split("/")[-1])
+        (ruta_local / nombre_archivo).touch()   # archivo vacío — solo el nombre importa
+
+    logger.info(
+        "  %d archivos listados en 00 (sin descarga): %s",
+        total, [urllib.parse.unquote(s.split("/")[-1]) for s in archivos_srel],
+    )
+    return ruta_local, {"total": total, "exitosos": total, "fallidos": 0}
 
 
 def descargar_visita_selectiva(
