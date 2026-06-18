@@ -521,6 +521,16 @@ def _buscar_carpeta_03_en_sharepoint(
     )
 
 
+def _buscar_carpeta_04_en_sharepoint(
+    sess: requests.Session, host: str, web: str, rel_raiz: str
+) -> str | None:
+    """Localiza la subcarpeta que empieza por '04' (capitalización)."""
+    return _buscar_subcarpeta(
+        sess, host, web, rel_raiz,
+        lambda n: n.startswith("04"),
+    )
+
+
 def _es_carpeta_modulo(nombre: str) -> bool:
     """True si el nombre normalizado corresponde a una carpeta de módulo."""
     return bool(re.search(r'mod(?:ulo)?[_\s\-]*\d', nombre))
@@ -648,6 +658,90 @@ def descargar_carpeta_03(url: str, dest_base: Path, id_unico: str) -> dict:
             nombre_sub, txrx_path is not None, conteo_evidencia,
         )
 
+    return resultado
+
+
+def descargar_carpeta_04(url: str, dest_base: Path, id_unico: str) -> dict:
+    """
+    Procesa la carpeta 04_* (capitalización):
+
+    1. Localiza la carpeta 04 en la raíz del beneficiario.
+    2. Dentro de 04, busca la primera subcarpeta cuyo nombre empieza por '01'.
+    3. Descarga todos los archivos de esa subcarpeta 01_* en dest_base.
+
+    Retorna:
+      encontrada        → bool — se encontró la carpeta 04
+      sub01_encontrada  → bool — se encontró la subcarpeta 01 dentro de 04
+      archivos          → list[Path] — archivos descargados
+      conteo            → int — total de archivos en la subcarpeta (descargados)
+    """
+    resultado: dict = {
+        "encontrada":       False,
+        "sub01_encontrada": False,
+        "archivos":         [],
+        "conteo":           0,
+    }
+
+    sess           = _nueva_sesion()
+    host, web, rel = resolver(sess, url)
+
+    rel_04 = _buscar_carpeta_04_en_sharepoint(sess, host, web, rel)
+    if rel_04 is None:
+        logger.warning("No se encontró carpeta 04 en: %s", rel)
+        return resultado
+
+    resultado["encontrada"] = True
+    logger.info("Carpeta 04 encontrada: %s", rel_04)
+
+    # Buscar subcarpeta que empieza con "01" dentro de 04
+    try:
+        subcarpetas_04, _ = _listar_carpeta(sess, host, web, rel_04)
+    except Exception as exc:
+        logger.warning("Error listando 04 '%s': %s", rel_04, exc)
+        return resultado
+
+    rel_sub01 = None
+    for rel_sub in subcarpetas_04:
+        nombre_sub = normalizar(rel_sub.rstrip("/").split("/")[-1])
+        if nombre_sub.startswith("01"):
+            rel_sub01 = rel_sub
+            break
+
+    if rel_sub01 is None:
+        logger.warning("No se encontró subcarpeta 01_* dentro de 04: %s", rel_04)
+        return resultado
+
+    resultado["sub01_encontrada"] = True
+    nombre_sub01 = urllib.parse.unquote(rel_sub01.rstrip("/").split("/")[-1])
+    logger.info("Subcarpeta 01 encontrada dentro de 04: %s", nombre_sub01)
+
+    # Descargar todos los archivos de la subcarpeta 01_*
+    try:
+        _, archivos_sub01 = _listar_carpeta(sess, host, web, rel_sub01)
+    except Exception as exc:
+        logger.warning("Error listando subcarpeta '%s': %s", rel_sub01, exc)
+        return resultado
+
+    dest_sub = dest_base / nombre_sub01
+    dest_sub.mkdir(parents=True, exist_ok=True)
+
+    descargados: list[Path] = []
+    for srel in archivos_sub01:
+        nombre_arch = urllib.parse.unquote(srel.rstrip("/").split("/")[-1])
+        destino     = dest_sub / nombre_arch
+        size        = _bajar_archivo(sess, host, srel, destino)
+        if size >= 0:
+            descargados.append(destino)
+            logger.info("    04/01 descargado: %s (%d bytes)", nombre_arch, size)
+        else:
+            logger.warning("    04/01 fallo descarga: %s", nombre_arch)
+
+    resultado["archivos"] = descargados
+    resultado["conteo"]   = len(descargados)
+    logger.info(
+        "  04/%s: %d/%d archivos descargados",
+        nombre_sub01, len(descargados), len(archivos_sub01),
+    )
     return resultado
 
 

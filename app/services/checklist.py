@@ -48,6 +48,7 @@ ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 # ── Columnas ──────────────────────────────────────────────────────────────────
 
 _MORADO   = "FF5C3273"   # encabezado 02 Visita 2
+_CAFE     = "FF7B3F00"   # encabezado 04 Capitalización
 
 COLUMNAS = [
     # Identificación
@@ -72,6 +73,12 @@ COLUMNAS = [
     "03_INDIVIDUAL",
     "03_MODULOS",
     "03_ASISTENCIA",
+    # Carpeta 04 (Capitalización)
+    "04_XLSX",
+    "04_PDF",
+    "04_FIRMAS",
+    "04_COTIZACION",
+    "04_WEB",
     # General
     "observaciones",
 ]
@@ -88,6 +95,11 @@ _ANCHOS_MIN = {
     "03_ENCUESTAS":      25, "03_GRUPAL":       18,
     "03_INDIVIDUAL":     18, "03_MODULOS":      50,
     "03_ASISTENCIA":     55,
+    "04_XLSX":           45,
+    "04_PDF":            30,
+    "04_FIRMAS":         30,
+    "04_COTIZACION":     55,
+    "04_WEB":            45,
     "observaciones":     50,
 }
 
@@ -112,6 +124,7 @@ _COLS_03_IDX = {
     col: COLUMNAS.index(col) + 1
     for col in ("03_ENCUESTAS", "03_GRUPAL", "03_INDIVIDUAL", "03_MODULOS", "03_ASISTENCIA")
 }
+_COLS_04_IDX = {col: COLUMNAS.index(col) + 1 for col in ("04_XLSX", "04_PDF", "04_FIRMAS", "04_COTIZACION", "04_WEB")}
 
 # Orden y color de cada grupo-carpeta para la fila de encabezado superior
 _GRUPOS_ORDEN = [
@@ -124,6 +137,7 @@ _GRUPOS_ORDEN = [
                           "02_DIAGNOSTICO", "02_PLAN_NEGOCIO"],                   _MORADO),
     ("03 Capacitación",  ["03_ENCUESTAS", "03_GRUPAL", "03_INDIVIDUAL",
                           "03_MODULOS", "03_ASISTENCIA"],                          _TEAL),
+    ("04 Capitalización", ["04_XLSX", "04_PDF", "04_FIRMAS", "04_COTIZACION", "04_WEB"], _CAFE),
     ("General",          ["observaciones"],                                        _GRIS),
 ]
 
@@ -181,6 +195,12 @@ class ChecklistWriter:
             resultado.get("03_individual",      "N/A"),
             resultado.get("03_modulos",         "N/A"),
             resultado.get("03_asistencia",      "N/A"),
+            # 04
+            resultado.get("04_xlsx",            "N/A"),
+            resultado.get("04_pdf",             "N/A"),
+            resultado.get("04_firmas",          "N/A"),
+            resultado.get("04_cotizacion",      "N/A"),
+            resultado.get("04_web",             "N/A"),
             # General
             resultado.get("observaciones", ""),
         ]
@@ -261,6 +281,14 @@ class ChecklistWriter:
                 celda = self._ws.cell(row=fila_num, column=col_idx)
                 celda.fill = FILL_AMARILLO
                 celda.font = FONT_IA_WARN
+
+        # Rojo en columnas 04 si tienen FALTA
+        for col_nombre, col_idx in _COLS_04_IDX.items():
+            val = str(valores[COLUMNAS.index(col_nombre)])
+            if "FALTA" in val.upper() or "INCOMPLETA" in val.upper():
+                celda      = self._ws.cell(row=fila_num, column=col_idx)
+                celda.fill = FILL_ROJO
+                celda.font = FONT_FALTA
 
         # Auto-fit
         for i, valor in enumerate(valores):

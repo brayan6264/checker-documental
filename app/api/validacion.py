@@ -24,7 +24,7 @@ router   = APIRouter()
 _jobs: Dict[str, Dict[str, Any]] = {}
 
 
-_FLUJOS_VALIDOS = {"00", "01", "02", "03"}
+_FLUJOS_VALIDOS = {"00", "01", "02", "03", "04"}
 
 
 @router.post("/validar", summary="Inicia la validación de una matriz Excel")
@@ -34,9 +34,9 @@ async def iniciar_validacion(
         default=None,
         description=(
             "Flujos a ejecutar, separados por coma. "
-            "Valores posibles: 00, 01, 02, 03. "
+            "Valores posibles: 00, 01, 02, 03, 04. "
             "Dejar vacío para ejecutar todos. "
-            "Ejemplos: '00,01'  |  '02,03'  |  '00'"
+            "Ejemplos: '00,01'  |  '02,03'  |  '04'  |  '00,04'"
         ),
     ),
 ):
@@ -49,6 +49,7 @@ async def iniciar_validacion(
     - **01** : Visita 1 — Caracterización (acta, fotos, tratamiento de datos)
     - **02** : Visita 2 — Diagnóstico y plan de negocio
     - **03** : Capacitación (encuestas, grupos, módulos TX/RX)
+    - **04** : Capitalización (PLAN_INVERSION.xlsx + PDF con "Plan de inversión")
 
     Se pueden combinar: `00,01` valida solo documentación y primera visita.
     """
@@ -83,7 +84,7 @@ async def iniciar_validacion(
         "filas_total":      0,
         "filas_procesadas": 0,
         "errores":          0,
-        "flujos":           sorted(flujos_set) if flujos_set else ["00", "01", "02", "03"],
+        "flujos":           sorted(flujos_set) if flujos_set else ["00", "01", "02", "03", "04"],
         "ruta_checklist":   str(ruta_checklist),
     }
 
@@ -97,10 +98,11 @@ async def iniciar_validacion(
     return {
         "job_id":        job_id,
         "estado":        "iniciado",
-        "flujos":        sorted(flujos_set) if flujos_set else ["00", "01", "02", "03"],
+        "flujos":        sorted(flujos_set) if flujos_set else ["00", "01", "02", "03", "04"],
         "estado_url":    f"/validacion/estado/{job_id}",
         "resultado_url": f"/validacion/resultado/{job_id}",
     }
+
 
 
 @router.get("/estado/{job_id}", summary="Consulta el estado de un trabajo")

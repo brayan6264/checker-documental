@@ -15,5 +15,17 @@ requests>=2.31.0
 urllib3>=2.0.0
 
 # ── Análisis IA ───────────────────────────────────────────────────────────────
-openai>=1.30.0         # GPT-4o-mini con visión (requiere IA_HABILITADO=true)
-pymupdf>=1.24.0        # Conversión PDF → imágenes para análisis visual
+openai>=1.30.0         # GPT-4o-mini con visión y Responses API con web_search_preview
+pymupdf>=1.24.0        # Extracción de texto e imágenes de PDFs
+
+# ── OCR (PDFs escaneados) ─────────────────────────────────────────────────────
+pytesseract>=0.3.10    # Wrapper Python para Tesseract OCR
+Pillow>=10.0.0         # Procesamiento de imágenes para OCR
+# Nota: requiere Tesseract binario instalado en el sistema:
+#   Windows: winget install UB-Mannheim.TesseractOCR
+#   Linux:   apt install tesseract-ocr tesseract-ocr-spa
+#   macOS:   brew install tesseract tesseract-lang
+# Idioma español: descargar spa.traineddata → tessdata/
+
+# ── Capturas web (cotizaciones de referencia) ─────────────────────────────────
+playwright>=1.44.0     # Chromium headless para screenshots (requiere: playwright install chromium)
