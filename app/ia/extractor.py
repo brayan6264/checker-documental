@@ -12,6 +12,7 @@ Dependencias:
   # Idioma español:    C:\Program Files\Tesseract-OCR\tessdata\spa.traineddata
 """
 
+import base64
 import logging
 from pathlib import Path
 
@@ -22,6 +23,9 @@ _EXTENSIONES_IMAGEN = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
 
 # Si el PDF tiene menos de este promedio de caracteres por página se considera escaneado
 _CHARS_POR_PAGINA_UMBRAL = 50
+
+# Si el OCR devuelve menos de este promedio de chars/página se considera fallido
+_CHARS_OCR_MINIMO = 80
 
 # Ruta del ejecutable Tesseract en Windows
 _TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -99,7 +103,21 @@ def _extraer_pdf(ruta: Path) -> str:
     texto_ocr = _ocr_pdf(doc, ruta)
     doc.close()
 
-    # Si el OCR también falla devolver lo que hubo
+    # Evaluar si el OCR fue suficiente
+    chars_ocr = len(texto_ocr.strip())
+    if chars_ocr >= _CHARS_OCR_MINIMO:
+        return texto_ocr
+
+    # OCR insuficiente — fallback a GPT-4o-mini con el PDF completo
+    logger.warning(
+        "PDF '%s': OCR insuficiente (%d chars). Enviando a GPT-4o-mini...",
+        ruta.name, chars_ocr,
+    )
+    texto_gpt = _extraer_con_gpt(ruta)
+    if texto_gpt:
+        return texto_gpt
+
+    # Último recurso: devolver lo poco que haya
     return texto_ocr or "\n".join(paginas_texto).strip()
 
 
@@ -136,6 +154,65 @@ def _ocr_pdf(doc, ruta: Path) -> str:
     resultado = "\n".join(partes).strip()
     logger.info("  OCR completado '%s': %d chars totales", ruta.name, len(resultado))
     return resultado
+
+
+def _extraer_con_gpt(ruta: Path) -> str:
+    """
+    Fallback cuando el OCR de Tesseract es insuficiente en un PDF escaneado.
+    Envía el PDF completo a gpt-4o-mini vía OpenAI Responses API (PDF inline en base64)
+    y pide que transcriba todo el texto visible.
+    Solo se activa para PDFs escaneados con OCR fallido; no se llama para PDFs con texto nativo.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        logger.warning("openai no instalado — no se puede usar fallback GPT para OCR.")
+        return ""
+
+    try:
+        from app.config import OPENAI_API_KEY
+    except Exception:
+        OPENAI_API_KEY = ""
+
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY no configurada — no se puede usar fallback GPT para OCR.")
+        return ""
+
+    try:
+        pdf_b64 = base64.b64encode(ruta.read_bytes()).decode()
+        client  = OpenAI(api_key=OPENAI_API_KEY)
+
+        response = client.responses.create(
+            model="gpt-4o-mini",
+            input=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_file",
+                        "filename": ruta.name,
+                        "file_data": f"data:application/pdf;base64,{pdf_b64}",
+                    },
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Transcribe TODO el texto visible en este documento exactamente "
+                            "como aparece, incluyendo nombres, fechas, números, direcciones y "
+                            "cualquier otro dato. No resumas ni interpretes; solo transcribe el "
+                            "contenido completo del documento."
+                        ),
+                    },
+                ],
+            }],
+        )
+        texto = (response.output_text or "").strip()
+        logger.info(
+            "  GPT-4o-mini OCR fallback '%s': %d chars extraídos.", ruta.name, len(texto)
+        )
+        return texto
+
+    except Exception as exc:
+        logger.error("  GPT-4o-mini OCR fallback error '%s': %s", ruta.name, exc)
+        return ""
 
 
 def _extraer_imagen_ocr(ruta: Path) -> str:

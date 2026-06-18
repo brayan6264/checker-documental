@@ -848,9 +848,12 @@ class ValidadorDocumental:
                 dir_salida    = Path(self.ruta_checklist).parent
                 ruta_web_xls  = dir_salida / f"{nombre_seguro}.xlsx"
                 try:
-                    generar_excel_cotizaciones(id_unico, web_productos, screenshots, ruta_web_xls, seleccionadas_xlsx)
+                    alertas_precio = generar_excel_cotizaciones(id_unico, web_productos, screenshots, ruta_web_xls, seleccionadas_xlsx)
                     web_excel_nombre = ruta_web_xls.name
                     logger.info("  [%s] 04 — Excel web generado: %s", id_unico, ruta_web_xls.name)
+                    for alerta_msg in alertas_precio:
+                        obs.append(alerta_msg)
+                        logger.warning("  [%s] %s", id_unico, alerta_msg)
                 except Exception as exc:
                     logger.error("  [%s] 04 — Error generando Excel web: %s", id_unico, exc)
                     obs.append(f"04 — Error generando Excel de precios web: {exc}")
