@@ -769,6 +769,81 @@ def _formatear_cop(valor: int) -> str:
     return f"$ {valor:,}".replace(",", ".")
 
 
+# ── Análisis de desviación de precio ─────────────────────────────────────────
+
+class AlertaDesviacion:
+    """Resultado del análisis de precio cotización vs. promedio internet."""
+    __slots__ = ("promedio_internet", "precio_cotizacion", "desviacion_pct",
+                 "limite_pct", "supera_limite", "mensaje")
+
+    def __init__(
+        self,
+        promedio_internet: int,
+        precio_cotizacion: int,
+        desviacion_pct: float,
+        limite_pct: float,
+        supera_limite: bool,
+        mensaje: str,
+    ):
+        self.promedio_internet  = promedio_internet
+        self.precio_cotizacion  = precio_cotizacion
+        self.desviacion_pct     = desviacion_pct
+        self.limite_pct         = limite_pct
+        self.supera_limite      = supera_limite
+        self.mensaje            = mensaje
+
+
+def _analizar_desviacion(
+    precio_cotizacion: int,
+    precios_internet: list[int],
+) -> AlertaDesviacion | None:
+    """
+    Compara el precio de la cotización seleccionada contra el promedio de los
+    precios encontrados en internet.
+
+    Reglas:
+      - Precio cotización < 500.000 COP → límite de desviación: 50 %
+      - Precio cotización ≥ 500.000 COP → límite de desviación: 20 %
+
+    La desviación se mide como:
+        (promedio_internet - precio_cotizacion) / precio_cotizacion × 100
+
+    Si promedio_internet > precio_cotizacion × (1 + límite/100) → alerta.
+    Retorna None si no hay precios de internet disponibles.
+    """
+    precios_validos = [p for p in precios_internet if p and p > 0]
+    if not precios_validos or not precio_cotizacion:
+        return None
+
+    promedio = int(sum(precios_validos) / len(precios_validos))
+    desviacion_pct = (promedio - precio_cotizacion) / precio_cotizacion * 100
+    limite_pct = 50.0 if precio_cotizacion < 500_000 else 20.0
+    supera = desviacion_pct > limite_pct
+
+    if supera:
+        exceso = desviacion_pct - limite_pct
+        mensaje = (
+            f"⚠ ALERTA: el promedio de internet ($ {promedio:,}".replace(",", ".") +
+            f") supera el precio cotizado en {desviacion_pct:.1f}% "
+            f"(límite permitido: {limite_pct:.0f}%, exceso: {exceso:.1f}%)"
+        )
+    else:
+        mensaje = (
+            f"✓ OK: el promedio de internet ($ {promedio:,}".replace(",", ".") +
+            f") está dentro del rango permitido "
+            f"(desviación: {desviacion_pct:+.1f}%, límite: ±{limite_pct:.0f}%)"
+        )
+
+    return AlertaDesviacion(
+        promedio_internet=promedio,
+        precio_cotizacion=precio_cotizacion,
+        desviacion_pct=desviacion_pct,
+        limite_pct=limite_pct,
+        supera_limite=supera,
+        mensaje=mensaje,
+    )
+
+
 # ── Excel ─────────────────────────────────────────────────────────────────────
 
 def generar_excel_cotizaciones(
@@ -776,11 +851,19 @@ def generar_excel_cotizaciones(
     productos: list[ProductoLinks],
     screenshots: dict[str, ResultadoScreenshot],
     ruta_salida: Path,
+    seleccionadas: list | None = None,   # list[CotizacionSeleccionada]
 ) -> None:
     """Genera el Excel de referencia de precios web (una hoja por producto + índice)."""
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.drawing.image import Image as XLImage
+
+    # Índice rápido para buscar precio de cotización por nombre de item
+    precio_cotizacion_por_item: dict[str, int] = {}
+    if seleccionadas:
+        for sel in seleccionadas:
+            if sel.valor_total:
+                precio_cotizacion_por_item[sel.item] = sel.valor_total
 
     hoy = date.today().strftime("%d/%m/%Y")
 
@@ -926,6 +1009,71 @@ def generar_excel_cotizaciones(
                 ws.cell(row=img_row, column=4, value="[Captura no disponible]").font = _font(color="999999")
 
             current_row += IMG_ROWS + 1
+
+        # ── Bloque de análisis de desviación ─────────────────────────────
+        precios_internet = [
+            (screenshots.get(lk.url) or ResultadoScreenshot(None, None, None, False)).precio_numero
+            or lk.precio_numero
+            for lk in prod.links
+        ]
+        precio_cotiz = precio_cotizacion_por_item.get(prod.item)
+
+        current_row += 1  # fila de separación
+
+        # Encabezado del bloque
+        ws.merge_cells(f"A{current_row}:E{current_row}")
+        hdr_cell           = ws.cell(row=current_row, column=1, value="ANÁLISIS DE PRECIO")
+        hdr_cell.font      = _font(bold=True, size=11, color=_C_WHITE)
+        hdr_cell.fill      = _fill(_C_DARK)
+        hdr_cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[current_row].height = 20
+        current_row += 1
+
+        # Fila: precio de la cotización seleccionada
+        ws.cell(row=current_row, column=1, value="Precio cotización elegida:").font = _font(bold=True, size=10)
+        val_cotiz = _formatear_cop(precio_cotiz) if precio_cotiz else "No disponible"
+        c = ws.cell(row=current_row, column=2, value=val_cotiz)
+        c.font      = _font(bold=True, size=10)
+        c.alignment = Alignment(horizontal="left")
+        ws.row_dimensions[current_row].height = 18
+        current_row += 1
+
+        # Filas: precios individuales de internet
+        for idx, (lk, p_int) in enumerate(zip(prod.links, precios_internet), 1):
+            ws.cell(row=current_row, column=1, value=f"  Precio internet #{idx}:").font = _font(size=10, color="444444")
+            val_txt = _formatear_cop(p_int) if p_int else "No extraído"
+            ws.cell(row=current_row, column=2, value=val_txt).font = _font(size=10)
+            ws.row_dimensions[current_row].height = 16
+            current_row += 1
+
+        # Fila: promedio internet
+        precios_con_valor = [p for p in precios_internet if p]
+        if precios_con_valor:
+            promedio_int = int(sum(precios_con_valor) / len(precios_con_valor))
+            ws.cell(row=current_row, column=1, value="Promedio internet:").font = _font(bold=True, size=10)
+            ws.cell(row=current_row, column=2, value=_formatear_cop(promedio_int)).font = _font(bold=True, size=10)
+        else:
+            ws.cell(row=current_row, column=1, value="Promedio internet:").font = _font(bold=True, size=10)
+            ws.cell(row=current_row, column=2, value="Sin datos").font = _font(size=10, color="999999")
+        ws.row_dimensions[current_row].height = 18
+        current_row += 1
+
+        # Fila: resultado del análisis
+        alerta = _analizar_desviacion(precio_cotiz, precios_internet) if precio_cotiz else None
+        if alerta:
+            color_fondo = "FFCCCC" if alerta.supera_limite else "CCFFCC"
+            color_texto = "CC0000" if alerta.supera_limite else "1A5C1A"
+            ws.merge_cells(f"A{current_row}:E{current_row}")
+            result_cell           = ws.cell(row=current_row, column=1, value=alerta.mensaje)
+            result_cell.font      = Font(name="Arial", size=10, bold=True, color=color_texto)
+            result_cell.fill      = _fill(color_fondo)
+            result_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+            ws.row_dimensions[current_row].height = 30
+        else:
+            ws.merge_cells(f"A{current_row}:E{current_row}")
+            nc = ws.cell(row=current_row, column=1, value="Sin datos suficientes para el análisis de desviación.")
+            nc.font = _font(size=10, color="999999")
+            ws.row_dimensions[current_row].height = 18
 
     ruta_salida.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(ruta_salida))

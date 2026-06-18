@@ -848,7 +848,7 @@ class ValidadorDocumental:
                 dir_salida    = Path(self.ruta_checklist).parent
                 ruta_web_xls  = dir_salida / f"{nombre_seguro}.xlsx"
                 try:
-                    generar_excel_cotizaciones(id_unico, web_productos, screenshots, ruta_web_xls)
+                    generar_excel_cotizaciones(id_unico, web_productos, screenshots, ruta_web_xls, seleccionadas_xlsx)
                     web_excel_nombre = ruta_web_xls.name
                     logger.info("  [%s] 04 — Excel web generado: %s", id_unico, ruta_web_xls.name)
                 except Exception as exc:
