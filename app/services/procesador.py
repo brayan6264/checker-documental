@@ -14,6 +14,7 @@ Flujo por fila:
 """
 
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -51,6 +52,7 @@ from app.services.checklist import ChecklistWriter
 from app.services.sharepoint import (
     descargar_carpeta_doc,
     descargar_carpeta_03,
+    descargar_carpeta_04,
     descargar_visita_selectiva,
     descargar_visita2_selectiva,
 )
@@ -70,6 +72,37 @@ _ANALIZADORES = {
 }
 
 
+def _armar_04(resultado_04: dict) -> tuple[str, str, str, str, str, str]:
+    """Retorna (xlsx, pdf, firmas, cotizacion, cotiz_carpeta, web) para el checklist."""
+    _FALTA_04  = "FALTA (04 no encontrada)"
+    _FALTA_SUB = "FALTA (subcarpeta 01 no encontrada)"
+
+    if not resultado_04.get("encontrada"):
+        return _FALTA_04, _FALTA_04, _FALTA_04, _FALTA_04, _FALTA_04, _FALTA_04
+    if not resultado_04.get("sub01_encontrada"):
+        return _FALTA_SUB, _FALTA_SUB, _FALTA_SUB, _FALTA_SUB, _FALTA_SUB, _FALTA_SUB
+
+    xlsx_encontrado = resultado_04.get("xlsx_encontrado", False)
+    xlsx_valido     = resultado_04.get("xlsx_valido",     False)
+    xlsx_resumen    = resultado_04.get("xlsx_resumen",    "FALTA")
+    pdf_ok          = resultado_04.get("pdf_plan",        False)
+    firmas_resumen  = resultado_04.get("firmas_resumen",  "N/A")
+    cot_resumen     = resultado_04.get("cot_pdf_resumen", "N/A")
+    cotiz_carpeta   = resultado_04.get("cotiz_carpeta_resumen", "N/A")
+    web_txt         = resultado_04.get("web_excel",       "N/A")
+
+    if not xlsx_encontrado:
+        xlsx_txt = "FALTA PLAN_INVERSION.xlsx"
+    elif xlsx_valido:
+        xlsx_txt = f"OK — {xlsx_resumen}"
+    else:
+        xlsx_txt = f"Cotizaciones incompletas — {xlsx_resumen}"
+
+    pdf_txt = "OK — Plan de inversión encontrado" if pdf_ok else "FALTA — PDF con 'Plan de inversión' no encontrado"
+
+    return xlsx_txt, pdf_txt, firmas_resumen, cot_resumen, cotiz_carpeta, web_txt
+
+
 class ValidadorDocumental:
     """
     Componente de validación documental.
@@ -80,7 +113,7 @@ class ValidadorDocumental:
     """
 
     # Flujos válidos disponibles
-    FLUJOS_VALIDOS = {"00", "01", "02", "03"}
+    FLUJOS_VALIDOS = {"00", "01", "02", "03", "04"}
 
     def __init__(
         self,
@@ -195,11 +228,12 @@ class ValidadorDocumental:
     # ── Procesamiento de una fila ─────────────────────────────────────────────
 
     def _procesar_fila(self, fila: pd.Series) -> dict:
-        id_unico   = str(fila.get("ID_unico",      "")).strip()
-        modalidad  = str(fila.get("modalidad",     "")).strip().upper()
-        unidad_doc = str(fila.get("unidad_doc",    "")).strip()
-        link       = str(fila.get("carpetas_link", "")).strip()
-        integrante = self._componer_integrante(fila)
+        id_unico      = str(fila.get("ID_unico",      "")).strip()
+        modalidad     = str(fila.get("modalidad",     "")).strip().upper()
+        unidad_doc    = str(fila.get("unidad_doc",    "")).strip()
+        link          = str(fila.get("carpetas_link", "")).strip()
+        departamento  = str(fila.get("Departamento",  "")).strip()
+        integrante    = self._componer_integrante(fila)
 
         observaciones: list[str] = []
         tiene_error = False
@@ -210,7 +244,7 @@ class ValidadorDocumental:
             observaciones.append(f"Modalidad inválida: '{modalidad}'")
             return self._armar_resultado(
                 id_unico, modalidad, unidad_doc, integrante,
-                estados_por_defecto(modalidad), {}, {}, {}, observaciones, tiene_error=True,
+                estados_por_defecto(modalidad), {}, {}, {}, {}, observaciones, tiene_error=True,
                 flujos=self.flujos,
             )
 
@@ -273,7 +307,17 @@ class ValidadorDocumental:
             resultado_03 = _omitido
             logger.info("  [%s] 03 omitido (no incluido en flujos)", id_unico)
 
-        # ── 6. Limpiar temporales ─────────────────────────────────────────────
+        # ── 6. Carpeta 04_* (capitalización) ──────────────────────────────────
+        if "04" in self.flujos:
+            resultado_04 = self._procesar_04(id_unico, link, dest_base / "cap04", departamento)
+            observaciones.extend(resultado_04["observaciones"])
+            if resultado_04["tiene_error"]:
+                tiene_error = True
+        else:
+            resultado_04 = _omitido
+            logger.info("  [%s] 04 omitido (no incluido en flujos)", id_unico)
+
+        # ── 7. Limpiar temporales ─────────────────────────────────────────────
         if dest_base.exists():
             try:
                 shutil.rmtree(dest_base)
@@ -284,7 +328,7 @@ class ValidadorDocumental:
         return self._armar_resultado(
             id_unico, modalidad, unidad_doc, integrante,
             docs_estado, resultado_visita, resultado_visita2, resultado_03,
-            observaciones, tiene_error, self.flujos,
+            resultado_04, observaciones, tiene_error, self.flujos,
         )
 
     # ── Validación carpeta 01 ─────────────────────────────────────────────────
@@ -640,6 +684,258 @@ class ValidadorDocumental:
                     rutas[doc] = archivo
         return rutas
 
+    # ── Validación carpeta 04 ─────────────────────────────────────────────────
+
+    def _procesar_04(self, id_unico: str, link: str, dest_base: Path, departamento: str = "") -> dict:
+        from app.ia.extractor import extraer_texto
+
+        _FALLO = lambda obs: {
+            "encontrada": False, "sub01_encontrada": False,
+            "xlsx_plan": False, "pdf_plan": False,
+            "observaciones": obs, "tiene_error": True,
+        }
+
+        try:
+            info = descargar_carpeta_04(link, dest_base, id_unico)
+        except Exception as exc:
+            return _FALLO([f"04 — Error descargando carpeta: {exc}"])
+
+        if not info["encontrada"]:
+            return _FALLO(["04_CAPITALIZACION no encontrada en SharePoint"])
+
+        if not info["sub01_encontrada"]:
+            return {
+                "encontrada": True, "sub01_encontrada": False,
+                "xlsx_plan": False, "pdf_plan": False,
+                "observaciones": ["04 — Subcarpeta 01 no encontrada dentro de 04"],
+                "tiene_error": True,
+            }
+
+        archivos: list[Path]    = info.get("archivos", [])
+        archivos_02: list[Path] = info.get("archivos_02", [])
+        obs: list[str]          = []
+        tiene_error             = False
+
+        from app.core.plan_inversion import (
+            validar_plan_inversion,
+            verificar_firmas_pdf,
+            validar_cotizacion_seleccionada_en_pdf,
+            validar_cotizaciones_en_carpeta,
+        )
+        from app.core.cotizacion_web import (
+            buscar_links_openai,
+            tomar_screenshots,
+            generar_excel_cotizaciones,
+        )
+        from app.config import OPENAI_API_KEY
+
+        # ── 1. Verificar XLSX con "PLAN_INVERSION" en el nombre ──────────────
+        xlsx_plan = next(
+            (
+                a for a in archivos
+                if a.suffix.lower() == ".xlsx"
+                and "plan_inversion" in normalizar(a.stem)
+            ),
+            None,
+        )
+        xlsx_valido      = False
+        xlsx_resumen     = "FALTA"
+        seleccionadas_xlsx = []
+        todas_cotizaciones_xlsx = []
+
+        if xlsx_plan is None:
+            obs.append("04 — Falta PLAN_INVERSION.xlsx — no se validarán cotizaciones")
+            tiene_error  = True
+            xlsx_resumen = "FALTA — cotizaciones no analizadas"
+            logger.info("  [%s] 04 — PLAN_INVERSION.xlsx NO encontrado", id_unico)
+        else:
+            logger.info("  [%s] 04 — PLAN_INVERSION.xlsx encontrado: %s", id_unico, xlsx_plan.name)
+            resultado_xlsx     = validar_plan_inversion(xlsx_plan)
+            xlsx_valido             = resultado_xlsx.ok
+            xlsx_resumen            = resultado_xlsx.resumen
+            seleccionadas_xlsx      = resultado_xlsx.seleccionadas
+            todas_cotizaciones_xlsx = resultado_xlsx.todas_cotizaciones
+            if not resultado_xlsx.ok:
+                for alerta in resultado_xlsx.alertas:
+                    obs.append(
+                        f"04 — PLAN_INVERSION '{alerta.item}' "
+                        f"Cot.{alerta.cotizacion}: falta {alerta.campo}"
+                    )
+                tiene_error = True
+            logger.info("  [%s] 04 — PLAN_INVERSION: %s", id_unico, xlsx_resumen)
+
+        # ── 2. Verificar PDF con "Plan de inversión" en su contenido ─────────
+        # Prioridad: archivos con "FIRMA" en el nombre van primero.
+        _pdfs_raw = [a for a in archivos if a.suffix.lower() == ".pdf"]
+        pdfs = sorted(
+            _pdfs_raw,
+            key=lambda p: (0 if "firma" in p.name.lower() else 1),
+        )
+        pdf_plan_ok    = False
+        pdf_para_cruce = None
+        firmas_resumen = "N/A"
+        cot_pdf_resumen = "N/A"
+
+        if not pdfs:
+            obs.append("04 — No hay PDF en la subcarpeta 01 — firmas y cotizaciones no verificadas")
+            tiene_error    = True
+            firmas_resumen = "N/A — sin PDF"
+            logger.info("  [%s] 04 — Sin PDFs en subcarpeta 01", id_unico)
+        else:
+            for pdf in pdfs:
+                texto = extraer_texto(pdf)
+                if "plan de inversion" in normalizar(texto):
+                    pdf_plan_ok    = True
+                    pdf_para_cruce = pdf
+                    logger.info("  [%s] 04 — 'Plan de inversión' encontrado en: %s", id_unico, pdf.name)
+                    break
+            if not pdf_plan_ok:
+                obs.append(
+                    "04 — Ningún PDF contiene 'Plan de inversión'"
+                    f" (revisados: {', '.join(p.name for p in pdfs)})"
+                    " — firmas y cotizaciones no verificadas"
+                )
+                tiene_error    = True
+                firmas_resumen = "N/A — PDF sin contenido de Plan de inversión"
+                logger.info("  [%s] 04 — 'Plan de inversión' NO encontrado en PDFs", id_unico)
+
+        # ── 3. Verificar firmas en el PDF ────────────────────────────────────
+        if pdf_para_cruce is not None:
+            res_firmas     = verificar_firmas_pdf(pdf_para_cruce)
+            firmas_resumen = res_firmas.resumen
+            if not res_firmas.ok:
+                obs.append(f"04 — Firmas: {res_firmas.resumen}")
+                tiene_error = True
+                logger.info("  [%s] 04 — Firmas insuficientes: %s", id_unico, res_firmas.resumen)
+            else:
+                logger.info("  [%s] 04 — Firmas OK: %s", id_unico, res_firmas.resumen)
+
+        # ── 4. Cruce cotizaciones seleccionadas vs PDF ────────────────────────
+        cot_pdf_ok = False
+        if not seleccionadas_xlsx:
+            cot_pdf_resumen = "N/A — sin cotizaciones seleccionadas en XLSX"
+        elif pdf_para_cruce is None:
+            cot_pdf_resumen = "N/A — PDF no disponible"
+        else:
+            resultado_cot_pdf = validar_cotizacion_seleccionada_en_pdf(
+                seleccionadas_xlsx, pdf_para_cruce
+            )
+            cot_pdf_ok      = resultado_cot_pdf.ok
+            cot_pdf_resumen = resultado_cot_pdf.resumen
+            if not resultado_cot_pdf.ok:
+                for alerta in resultado_cot_pdf.alertas:
+                    obs.append(f"04 — Cotización seleccionada: {alerta}")
+                tiene_error = True
+            logger.info("  [%s] 04 — Cruce cotización/PDF: %s", id_unico, cot_pdf_resumen)
+
+        # ── 4b. Verificar las 3 cotizaciones en 02_COTIZACIONES_Y_COMPRA ──────
+        # Localiza el PDF de cada proveedor (por nombre parcial de la empresa) y
+        # valida que el valor_total de cada producto coincida. Si falta alguna
+        # cotización → se DETIENE el proceso (no se hace búsqueda web).
+        cotiz_carpeta_ok       = True
+        cotiz_carpeta_detiene  = False
+        cotiz_carpeta_resumen  = "N/A — sin cotizaciones en XLSX"
+        if todas_cotizaciones_xlsx:
+          try:
+            res_cotiz_carpeta = validar_cotizaciones_en_carpeta(
+                todas_cotizaciones_xlsx, archivos_02
+            )
+            cotiz_carpeta_ok      = res_cotiz_carpeta.ok
+            cotiz_carpeta_detiene = res_cotiz_carpeta.detiene
+            cotiz_carpeta_resumen = res_cotiz_carpeta.resumen
+            if not res_cotiz_carpeta.ok:
+                for alerta in res_cotiz_carpeta.alertas:
+                    obs.append(f"04 — Cotización en carpeta 02: {alerta}")
+                tiene_error = True
+          except Exception as exc:
+            # Nunca dejar que un fallo aquí tumbe la fila completa del checklist.
+            cotiz_carpeta_resumen = f"ERROR verificando carpeta 02: {exc}"
+            obs.append(f"04 — Cotización en carpeta 02: error — {exc}")
+            tiene_error = True
+            logger.error("  [%s] 04 — Error verificando carpeta 02: %s", id_unico, exc)
+          logger.info(
+                "  [%s] 04 — Cotizaciones en carpeta 02: %s",
+                id_unico, cotiz_carpeta_resumen,
+            )
+
+        # ── 5. Búsqueda web de precios de referencia ──────────────────────────
+        # Solo si los cruces de cotizaciones pasaron sin alertas.
+        web_excel_nombre = "N/A"
+        if not seleccionadas_xlsx:
+            logger.info("  [%s] 04 — Búsqueda web omitida: sin cotizaciones seleccionadas", id_unico)
+        elif cotiz_carpeta_detiene:
+            obs.append(
+                "04 — PROCESO DETENIDO: falta alguna cotización en 02_COTIZACIONES_Y_COMPRA "
+                "— búsqueda web omitida"
+            )
+            logger.warning("  [%s] 04 — Proceso detenido: cotización(es) faltante(s) en carpeta 02", id_unico)
+        elif not cot_pdf_ok:
+            obs.append(
+                "04 — Búsqueda web de precios de referencia omitida: "
+                "revisar primero las alertas de cotizaciones en el PDF"
+            )
+            logger.info("  [%s] 04 — Búsqueda web omitida por alertas en cotizaciones", id_unico)
+        else:
+            logger.info("  [%s] 04 — Iniciando búsqueda web de precios de referencia...", id_unico)
+            web_ok, web_productos, web_resumen = buscar_links_openai(seleccionadas_xlsx, OPENAI_API_KEY, departamento)
+            logger.info("  [%s] 04 — GPT-4.1 web: %s", id_unico, web_resumen)
+
+            if web_ok and web_productos:
+                dir_ss = dest_base / "_screenshots"
+                web_productos, screenshots = tomar_screenshots(web_productos, dir_ss, OPENAI_API_KEY, departamento)
+
+                # Nombre del Excel = id_unico (sanitizado para nombre de archivo)
+                nombre_seguro = re.sub(r'[\\/:*?"<>|]', "_", id_unico)
+                dir_salida    = Path(self.ruta_checklist).parent
+                ruta_web_xls  = dir_salida / f"{nombre_seguro}.xlsx"
+                try:
+                    alertas_precio = generar_excel_cotizaciones(id_unico, web_productos, screenshots, ruta_web_xls, seleccionadas_xlsx)
+                    logger.info("  [%s] 04 — Excel web generado: %s", id_unico, ruta_web_xls.name)
+                    for alerta_msg in alertas_precio:
+                        obs.append(alerta_msg)
+                        logger.warning("  [%s] %s", id_unico, alerta_msg)
+
+                    # Regla obligatoria: 3 cotizaciones (capturas/links) por producto.
+                    # Si algún producto quedó con menos, se marca COMPLETACIÓN MANUAL (amarillo).
+                    incompletos = [p for p in web_productos if len(p.links) < 3]
+                    if incompletos:
+                        detalle = "; ".join(f"{p.item} ({len(p.links)}/3)" for p in incompletos)
+                        web_excel_nombre = (
+                            f"REQUIERE COMPLETACIÓN MANUAL — {ruta_web_xls.name}: "
+                            f"{len(incompletos)} producto(s): {detalle} Capturas realizadas."
+                        )
+                        obs.append(
+                            f"04 — WEB: requiere completación manual, "
+                            f"{len(incompletos)} producto(s): {detalle} Capturas realizadas."
+                        )
+                        logger.warning(
+                            "  [%s] 04 — WEB completación manual: %s", id_unico, detalle
+                        )
+                    else:
+                        web_excel_nombre = ruta_web_xls.name
+                except Exception as exc:
+                    logger.error("  [%s] 04 — Error generando Excel web: %s", id_unico, exc)
+                    obs.append(f"04 — Error generando Excel de precios web: {exc}")
+                    tiene_error = True
+            else:
+                obs.append(f"04 — Búsqueda web: {web_resumen}")
+                tiene_error = True
+
+        return {
+            "encontrada":       True,
+            "sub01_encontrada": True,
+            "xlsx_encontrado":  xlsx_plan is not None,
+            "xlsx_valido":      xlsx_valido,
+            "xlsx_resumen":     xlsx_resumen,
+            "pdf_plan":         pdf_plan_ok,
+            "firmas_resumen":   firmas_resumen,
+            "cot_pdf_resumen":  cot_pdf_resumen,
+            "cotiz_carpeta_resumen": cotiz_carpeta_resumen,
+            "web_excel":        web_excel_nombre,
+            "observaciones":    obs,
+            "tiene_error":      tiene_error,
+        }
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -662,12 +958,13 @@ class ValidadorDocumental:
         resultado_visita: dict,
         resultado_visita2: dict,
         resultado_03: dict,
+        resultado_04: dict,
         observaciones: list,
         tiene_error: bool,
         flujos: Optional[set] = None,
     ) -> dict:
         if flujos is None:
-            flujos = {"00", "01", "02", "03"}
+            flujos = {"00", "01", "02", "03", "04"}
         _OMITIDO = "—"  # valor en Excel cuando el flujo no fue ejecutado
         ia = resultado_visita.get("ia", {})
         dv = resultado_visita.get("docs_visita", {k: "N/A" for k in DOCS_VISITA_ORDEN})
@@ -859,6 +1156,10 @@ class ValidadorDocumental:
             "03_modulos":      resultado_03.get("modulos_valor",    _OMITIDO) if "03" in flujos else _OMITIDO,
             "03_asistencia":   resultado_03.get("asistencia_valor", _OMITIDO) if "03" in flujos else _OMITIDO,
             "03_alertas":      resultado_03.get("alertas", {}) if "03" in flujos else {},
+            # Carpeta 04  (las claves se inyectan con ** en el dict padre)
+            **( dict(zip(("04_xlsx", "04_pdf", "04_firmas", "04_cotizacion", "04_cotizacion_carpeta", "04_web"), _armar_04(resultado_04)))
+                if "04" in flujos
+                else {"04_xlsx": _OMITIDO, "04_pdf": _OMITIDO, "04_firmas": _OMITIDO, "04_cotizacion": _OMITIDO, "04_cotizacion_carpeta": _OMITIDO, "04_web": _OMITIDO} ),
             "observaciones":   "; ".join(observaciones),
             "_tiene_error":    tiene_error,
         }
@@ -927,6 +1228,7 @@ class ValidadorDocumental:
         OPCIONALES = {
             "integrante_nombre1", "integrante_nombre2",
             "integrante_apellido1", "integrante_apellido2",
+            "Departamento",
         }
 
         df = pd.read_excel(ruta, sheet_name=hoja_activa, dtype=str)
