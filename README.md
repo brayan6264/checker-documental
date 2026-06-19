@@ -1,6 +1,8 @@
 # Validador Documental SharePoint
 
-Sistema que recibe un archivo Excel (la "matriz"), descarga únicamente la carpeta de documentación de cada registro desde SharePoint, valida que estén los documentos obligatorios según la modalidad, y produce un **checklist en Excel** con el resultado.
+Sistema que recibe un archivo Excel (la "matriz"), descarga selectivamente las carpetas de cada registro desde SharePoint, valida los documentos obligatorios y el contenido según la modalidad, y produce un **checklist en Excel** con el resultado.
+
+Cubre **5 flujos** de validación (00 a 04). El flujo **04 (Capitalización)** es el más completo: valida el PLAN_INVERSION.xlsx, las firmas, **cruza las 3 cotizaciones de cada producto contra los PDFs de la carpeta `02_COTIZACIONES_Y_COMPRA`**, y hace una **búsqueda web de precios de referencia** (Playwright + OpenAI) para detectar sobrecostos frente al mercado.
 
 ---
 
@@ -14,20 +16,25 @@ validador_documental/
 │   │
 │   ├── core/                      # Lógica de dominio pura
 │   │   ├── normalizacion.py       # Normalización de texto (tildes, mayúsculas)
-│   │   └── reglas.py              # Tabla de reglas por modalidad + evaluación
+│   │   ├── reglas.py              # Tabla de reglas por modalidad + evaluación
+│   │   ├── plan_inversion.py      # Validación PLAN_INVERSION.xlsx, firmas y
+│   │   │                          #   cotizaciones vs PDFs (carpeta 02 + OCR + GPT)
+│   │   └── cotizacion_web.py      # Búsqueda web de precios (Playwright + OpenAI)
 │   │
 │   ├── services/                  # Lógica de negocio
 │   │   ├── sharepoint.py          # Descarga selectiva de SharePoint
-│   │   ├── procesador.py          # Motor de validación (orquesta todo)
+│   │   ├── procesador.py          # Motor de validación (orquesta todos los flujos)
 │   │   └── checklist.py           # Escritura incremental del Excel de salida
 │   │
 │   ├── api/                       # Capa HTTP (routers FastAPI)
 │   │   ├── descarga.py            # POST /descarga/descargar
 │   │   └── validacion.py          # POST /validacion/validar, GET /estado, /resultado
 │   │
-│   └── ia/                        # Análisis semántico con IA (fase futura)
-│       ├── extractor.py           # Extrae texto/imagen de documentos
-│       └── validador.py           # Valida contenido con Claude (Anthropic)
+│   └── ia/                        # Análisis semántico con IA
+│       ├── extractor.py           # Extrae texto/imagen (texto nativo + OCR + fallback GPT)
+│       ├── validador.py           # Valida contenido con Claude (Anthropic)
+│       ├── analizador_visita.py   # Análisis visual GPT-4o de visita 1
+│       └── analizador_visita2.py  # Análisis visual GPT-4o de visita 2
 │
 ├── scripts/
 │   └── run.py                     # CLI sin servidor
@@ -97,7 +104,8 @@ La comparación es normalizada: sin tildes, sin distinción de mayúsculas/minú
 ## Instalación
 
 ```bash
-# 1. Clonar / descomprimir el proyecto
+# 1. Clonar el repositorio
+git clone <URL_DEL_REPOSITORIO>
 cd validador_documental
 
 # 2. Crear entorno virtual
@@ -105,13 +113,27 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # Linux/Mac
 
-# 3. Instalar dependencias
+# 3. Instalar dependencias de Python
 pip install -r requirements.txt
 
-# 4. Configurar variables de entorno (opcional)
-copy .env.example .env
-# Editar .env si se necesita cambiar rutas o habilitar IA
+# 4. Instalar el navegador para Playwright (REQUERIDO para el flujo 04 web)
+playwright install chromium
+
+# 5. Configurar variables de entorno
+copy .env.example .env          # Windows  (Linux/Mac: cp .env.example .env)
+# Editar .env: como mínimo agregar OPENAI_API_KEY para el flujo 04
 ```
+
+### Dependencias del sistema (no son paquetes pip)
+
+| Dependencia | Para qué | Cómo instalar |
+|-------------|----------|---------------|
+| **Navegador Chromium de Playwright** | Capturas de pantalla en la búsqueda web (flujo 04) | `playwright install chromium` |
+| **Tesseract OCR** | OCR de PDFs escaneados (flujo 04 — firmas/plan/cotizaciones) | Windows: instalar en `C:\Program Files\Tesseract-OCR\` con el paquete de idioma español (`spa`). Linux: `sudo apt install tesseract-ocr tesseract-ocr-spa` |
+
+> La ruta de Tesseract en Windows está fijada en `app/ia/extractor.py` y `app/core/plan_inversion.py` como `C:\Program Files\Tesseract-OCR\tesseract.exe`. Si lo instalas en otra ruta, ajústala ahí.
+
+> El flujo 04 (búsqueda web y OCR con fallback a IA) requiere `OPENAI_API_KEY`. Los flujos 00–03 funcionan sin OpenAI salvo que actives `IA_HABILITADO=true`.
 
 ---
 
@@ -215,6 +237,7 @@ Verás una pantalla similar a esta:
 | `01` | `01_VISITA_1_CARACTERIZACION` | Acta compromiso, acta visita, fotos, gestor, tratamiento datos |
 | `02` | `02_VISITA_2_DIAGNOSTICO` | Acta visita 2, diagnóstico, plan de negocio |
 | `03` | `03_CAPACITACION` | Encuestas, grupal, individual, módulos TX/RX |
+| `04` | `04_CAPITALIZACION` | PLAN_INVERSION.xlsx, firmas, cotizaciones vs carpeta 02, precios de mercado (web) |
 
 **Ejemplos de combinaciones:**
 
@@ -225,10 +248,11 @@ Verás una pantalla similar a esta:
 | Solo primera visita | `01` |
 | Solo segunda visita | `02` |
 | Solo capacitación | `03` |
+| Solo capitalización | `04` |
 | Documentación + primera visita | `00,01` |
 | Las dos visitas | `01,02` |
-| Todo excepto capacitación | `00,01,02` |
-| Capacitación + documentación | `00,03` |
+| Todo excepto capacitación | `00,01,02,04` |
+| Solo cotizaciones/precios | `04` |
 
 Las columnas de las carpetas no ejecutadas aparecerán como `—` en el checklist de salida.
 
@@ -237,7 +261,7 @@ Las columnas de las carpetas no ejecutadas aparecerán como `—` en el checklis
 {
   "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "estado": "iniciado",
-  "flujos": ["00", "01", "02", "03"],
+  "flujos": ["00", "01", "02", "03", "04"],
   "estado_url": "/validacion/estado/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "resultado_url": "/validacion/resultado/a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 }
@@ -401,6 +425,7 @@ El archivo Excel debe tener una hoja activa con **exactamente** estas columnas:
 | `modalidad`           | Sí        | M1, M2, M3 o M4                     |
 | `unidad_doc`          | Sí        | Unidad documental                    |
 | `carpetas_link`       | Sí        | URL anónima de la carpeta SharePoint |
+| `Departamento`        | No        | Departamento (flujo 04): si el producto es un ser vivo (plantas, semillas, animales), la búsqueda web se restringe a este departamento |
 | `integrante_nombre1`  | No        | Primer nombre del integrante         |
 | `integrante_nombre2`  | No        | Segundo nombre                       |
 | `integrante_apellido1`| No        | Primer apellido                      |
@@ -419,9 +444,71 @@ Copiar `.env.example` a `.env` y ajustar según el entorno:
 | `MAX_WORKERS_LISTADO`   | `8`                        | Hilos paralelos para listar carpetas         |
 | `MAX_WORKERS_DESCARGA`  | `12`                       | Hilos paralelos para descargar archivos      |
 | `CHECKLIST_LOTE_GUARDADO` | `50`                     | Filas antes de persistir el checklist a disco|
-| `IA_HABILITADO`         | `false`                    | Activa validación semántica con IA (OpenAI)  |
-| `OPENAI_API_KEY`        | *(vacío)*                  | API key de OpenAI (requerida si IA_HABILITADO=true) |
-| `OPENAI_MODEL`          | `gpt-4o`                   | Modelo OpenAI para análisis visual de documentos |
+| `IA_HABILITADO`         | `false`                    | Activa validación semántica con IA (flujos 01/02) |
+| `OPENAI_API_KEY`        | *(vacío)*                  | API key de OpenAI. **Requerida para el flujo 04** (búsqueda web + OCR fallback) y si `IA_HABILITADO=true` |
+| `OPENAI_MODEL`          | `gpt-4o`                   | Modelo OpenAI para análisis visual de documentos (flujos 01/02) |
+| `TIMEOUT_DESCARGA`      | `120`                      | Timeout (s) por archivo descargado de SharePoint |
+
+> Los modelos del flujo 04 están fijados en `app/core/cotizacion_web.py`: `gpt-4o` para búsqueda web y análisis visual, `gpt-4o-mini` para normalizar términos. El OCR fallback usa `gpt-4o-mini`.
+
+---
+
+## Flujo 04 — Capitalización (PLAN_INVERSION y cotizaciones)
+
+Es el flujo más completo. Se ejecuta con `flujos=04` (o vacío para todo). Descarga la carpeta `04_CAPITALIZACION` y procesa, en orden:
+
+```
+04_CAPITALIZACION
+├── 01_APROBACION_Y_PLAN
+│   ├── PLAN_INVERSION_*.xlsx   ← se valida estructura y cotizaciones
+│   └── FIRMA_UP_*.pdf / PLAN..pdf  ← firmas + cruce de cotización ganadora
+└── 02_COTIZACIONES_Y_COMPRA
+    ├── COTIZACION GANADORA/  → PDF del proveedor (ej. ...-ANGELNET.pdf)
+    ├── COTIZACION TED CEL/   → PDF del proveedor
+    └── COTIZACION WARRIORS/  → PDF del proveedor
+```
+
+**Pasos del flujo 04:**
+
+1. **PLAN_INVERSION.xlsx** — valida que cada ítem tenga sus 3 cotizaciones completas (proveedor, descripción, valor total) y detecta la cotización seleccionada (la marcada con `X`).
+
+2. **Firmas** — cuenta las imágenes de firma embebidas en el PDF del plan (mínimo 2).
+
+3. **Cruce de la cotización ganadora vs PDF del plan** — verifica que el valor total de la cotización seleccionada aparezca en el PDF. Para PDFs escaneados usa un pipeline de 3 capas: texto nativo → OCR (Tesseract) → GPT-4o-mini como segunda opinión.
+
+4. **Cotizaciones vs carpeta `02_COTIZACIONES_Y_COMPRA`** *(verificación nueva)*:
+   - Localiza el PDF de **cada proveedor** por **coincidencia parcial** del nombre de la empresa. El nombre del Excel (fila "Nombre proveedor") no es idéntico al del PDF: `ANGELNET INGENIERIA SAS` → busca `angelnet`. Se ignoran palabras genéricas (SAS, INGENIERIA, CIA, etc.).
+   - El texto se extrae **nativo, sin OCR ni IA** (los PDFs de cotización tienen caracteres).
+   - Valida que el valor total de **las 3 cotizaciones de cada producto** coincida con el precio del PDF del proveedor correspondiente.
+   - **Si falta el PDF de alguna cotización → se DETIENE el proceso** (no se hace búsqueda web).
+
+5. **Búsqueda web de precios de referencia** *(solo si los pasos anteriores pasan)*:
+   - OpenAI (`web_search_preview`, obligatorio vía `tool_choice`) busca URLs reales de tiendas colombianas para cada producto seleccionado. Excluye MercadoLibre.
+   - Playwright visita las URLs, toma capturas y extrae el precio del DOM.
+   - GPT-4o (visión) recibe las capturas como **imágenes** y valida que muestren el producto correcto y con precio.
+   - **Regla obligatoria: 3 capturas válidas por producto.** Si faltan, se hacen rondas de reemplazo (hasta 5). Si aún así no llega a 3 → se marca *completación manual*.
+   - Genera un Excel `{ID}.xlsx` (una hoja por producto con capturas + precios) y compara el precio cotizado contra la **mediana** de internet: alerta si supera 50 % (productos < 500.000 COP) o 20 % (≥ 500.000 COP).
+
+### Columnas del flujo 04 en el checklist de salida
+
+| Columna | Qué indica | Colores |
+|---------|------------|---------|
+| `04_PLAN_INVERSION_ENCONTRADO` | Estructura del PLAN_INVERSION.xlsx | 🔴 si falta/incompleto |
+| `04_PDF_APROBACION_ENCONTRADO` | PDF del plan presente | 🔴 si falta |
+| `04_PDF_APROBACION_FIRMADO` | Firmas encontradas en el PDF | 🔴 si insuficientes |
+| `04_CONSISTENCIA_COTIZACION_GANADORA` | Valor de la cotización ganadora coincide con el PDF del plan | 🔴 si no coincide |
+| `04_COTIZACIONES (carpeta 02)` | Las 3 cotizaciones existen y sus precios coinciden con los PDFs de la carpeta 02 | 🟡 si hay algo que revisar |
+| `04_VALIDACION_PRECIO_MERCADO` | Resultado de la búsqueda web (Excel generado / completación manual) | 🟡 si faltan capturas (completar manual) |
+
+**Código de colores general del checklist:**
+
+| Color | Significado |
+|-------|-------------|
+| 🔴 Rojo | Documento/dato faltante o error crítico |
+| 🟡 Amarillo | Requiere revisión o completación manual |
+| 🟠 Naranja | Alerta de desviación de precio de mercado (en la columna `observaciones`) |
+
+> El detalle completo de cada alerta (producto, proveedor, precio) siempre queda en la columna `observaciones`.
 
 ---
 
@@ -463,4 +550,8 @@ Para procesar un Excel directamente desde la terminal:
 python scripts/run.py ruta/matriz.xlsx ruta/checklist.xlsx
 ```
 
+El CLI ejecuta **todos los flujos (00–04)**; no permite seleccionar flujos (para eso usar la API). Requiere las mismas dependencias del sistema que el flujo 04: `OPENAI_API_KEY` en `.env`, navegador de Playwright (`playwright install chromium`) y Tesseract OCR.
+
 El proceso es **reanudable**: si se interrumpe, al volver a ejecutar con el mismo archivo de salida continúa desde donde quedó, saltando los registros ya procesados.
+
+> Para que aparezcan las columnas nuevas/renombradas del flujo 04, usa un archivo de checklist **nuevo** (vacío). `ChecklistWriter` solo escribe los encabezados al crear el archivo; si reutilizas uno viejo, conserva las columnas anteriores.

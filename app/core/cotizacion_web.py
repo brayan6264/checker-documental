@@ -2,13 +2,12 @@
 Búsqueda web de precios de referencia para cotizaciones seleccionadas.
 
 Flujo por producto:
-  1. buscar_links_openai()   — gpt-4o-mini + web_search_preview → 9 URLs candidatas.
+  1. buscar_links_openai()   — web_search_preview → URLs candidatas reales (no inventadas).
   2. tomar_screenshots()     — por ronda:
-       a. Playwright visita todas las URLs pendientes → guarda capturas en disco.
-       b. Se arma un PDF con las capturas de la ronda.
-       c. gpt-4o-mini analiza el PDF completo → identifica qué páginas son válidas
-          y extrae el precio de cada una.
-       d. Si hay ≥ 3 válidas → listo. Si no → buscar N URLs más y repetir.
+       a. Playwright visita las URLs → screenshot + precio DOM + base64.
+       b. La visión recibe las capturas como IMÁGENES → valida producto + extrae precio.
+       c. Si faltan válidas → busca URLs de reemplazo y repite.
+       d. Se detiene al alcanzar el mínimo o agotar las rondas.
   3. generar_excel_cotizaciones() — Excel con capturas válidas + análisis de precio.
 """
 
@@ -30,11 +29,41 @@ logger = logging.getLogger(__name__)
 # Un solo modelo para todo: búsqueda web + análisis de PDF
 _MODELO = "gpt-4o-mini"
 
+# Modelos diferenciados por tarea (calidad donde importa, ahorro donde no):
+#  - BÚSQUEDA: gpt-4o devuelve URLs reales de tiendas mucho mejor que mini.
+#  - ANÁLISIS (visión): gpt-4o detecta capturas vacías/erróneas y lee precios con
+#    mucha más fiabilidad que mini → menos falsos válidos y menos falsos inválidos.
+#  - TÉRMINOS: tarea simple de texto, mini es suficiente y barato.
+_MODELO_BUSQUEDA = "gpt-4o"
+_MODELO_ANALISIS = "gpt-4o"
+_MODELO_TERMINOS = "gpt-4o-mini"
+
 # URLs que Playwright visita en la primera ronda
 _URLS_INICIALES = 9
 
-# Máximo de rondas de búsqueda (inicial + reemplazos)
-_MAX_RONDAS = 3
+# Máximo de rondas de búsqueda (inicial + reemplazos).
+# Más rondas = más probabilidad de cumplir el mínimo obligatorio de 3 capturas.
+_MAX_RONDAS = 5
+
+# Mínimo obligatorio de capturas válidas por producto.
+_MIN_VALIDOS = 3
+
+# Tiendas reconocidas colombianas con inventario amplio y páginas estables.
+# La ronda 1 prioriza EXCLUSIVAMENTE estas tiendas para maximizar capturas exitosas.
+_TIENDAS_RECONOCIDAS = [
+    "alkosto.com", "homecenter.com.co", "exito.com", "falabella.com.co",
+    "ktronix.com", "panamericana.com.co", "jumbo.co", "makro.com.co",
+    "linio.com.co", "sodimac.com.co", "tuvendedor.com.co", "olimpica.com.co",
+    "flamingo.com.co", "cencosud.com.co", "lacomer.com.co", "pricesmart.com.co",
+    "craftmaster.com.co", "ferreterias-abc.com", "construmart.com.co",
+]
+
+# Tiendas reconocidas para productos agropecuarios / seres vivos
+_TIENDAS_AGRO = [
+    "agroinsumos.com.co", "almacenagrario.com.co", "agropecuariamundo.com",
+    "lahacienda.com.co", "cultivar.com.co", "bioagro.com.co",
+    "agropecuariacolombia.com", "viverosonline.com.co",
+]
 
 
 # ── Tipos ─────────────────────────────────────────────────────────────────────
@@ -75,6 +104,27 @@ def _url_bloqueada(url: str) -> bool:
     """Retorna True si la URL pertenece a un dominio bloqueado."""
     dominio = urlparse(url).netloc.lower().removeprefix("www.")
     return any(dominio == b or dominio.endswith("." + b) for b in _DOMINIOS_BLOQUEADOS)
+
+
+# Palabras clave que indican que el producto es un ser vivo (planta, semilla, animal, etc.)
+# Cuando la descripción los contiene, la búsqueda debe restringirse al departamento del proyecto.
+_RE_SERES_VIVOS = re.compile(
+    r'\b(?:'
+    r'planta[s]?|semilla[s]?|arbusto[s]?|árbol|arboles|árboles|palma[s]?|cactus|suculenta[s]?'
+    r'|flor(?:es)?|orquídea[s]?|helecho[s]?|hierba[s]?|yerba[s]?|follaje'
+    r'|abono[s]?|compost|sustrato[s]?|tierra\s+(?:fértil|para\s+(?:siembra|cultivo))'
+    r'|almácigo[s]?|esquejes?|bulbo[s]?|tubérculo[s]?|rizoma[s]?'
+    r'|animal(?:es)?|mascota[s]?|aves?|gallina[s]?|pollo[s]?|cerdo[s]?|conejo[s]?'
+    r'|bovino[s]?|ovino[s]?|caprino[s]?|pez|peces|alevino[s]?'
+    r'|cultivo[s]?|siembra|cosecha|vivero'
+    r')\b',
+    re.IGNORECASE,
+)
+
+
+def _es_producto_ser_vivo(descripcion: str) -> bool:
+    """Retorna True si la descripción corresponde a plantas, semillas u otros seres vivos."""
+    return bool(_RE_SERES_VIVOS.search(descripcion or ""))
 
 
 _RE_PRECIO_COP = re.compile(
@@ -131,15 +181,98 @@ def _extraer_json(text: str) -> dict | list | None:
     return None
 
 
+# ── PASO 0 — Normalización del término de búsqueda con IA ────────────────────
+
+def _derivar_terminos_busqueda(seleccionadas: list, api_key: str) -> dict[str, str]:
+    """
+    Para CADA cotización deriva un término de búsqueda comercial limpio.
+
+    Solución general: el texto de entrada puede ser cualquier cosa (un nombre
+    corto, un párrafo técnico, instrucciones de uso, un prospecto médico,
+    medidas, etc.). La IA lo reduce al producto comprable concreto: nombre
+    comercial + características clave que identifican el ítem en una tienda.
+
+    Retorna {item: termino_busqueda}. Si algo falla, cae a un recorte simple.
+    """
+    # Fallback genérico sin IA: primer fragmento antes de un punto/salto.
+    def _fallback(sel) -> str:
+        base = (sel.item or sel.descripcion or "").strip()
+        return re.split(r'[.\n]', base)[0].strip()[:120] or base[:120]
+
+    if not api_key:
+        return {sel.item: _fallback(sel) for sel in seleccionadas}
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+    except Exception:
+        return {sel.item: _fallback(sel) for sel in seleccionadas}
+
+    entradas = [
+        {
+            "id":          i,
+            "nombre":      (sel.item or "")[:300],
+            "descripcion": (sel.descripcion or "")[:600],
+        }
+        for i, sel in enumerate(seleccionadas)
+    ]
+
+    import json as _json
+    prompt = (
+        "Eres un experto en compras. Para cada ítem de la lista, genera el TÉRMINO DE BÚSQUEDA "
+        "más efectivo para encontrarlo a la venta en tiendas online colombianas.\n\n"
+        "REGLAS para el término:\n"
+        "- Debe ser el nombre comercial del producto físico comprable + sus características "
+        "distintivas clave (capacidad, potencia, tamaño, material, modelo si aplica).\n"
+        "- Máximo 12 palabras. Conciso, como lo buscaría un comprador.\n"
+        "- IGNORA texto que no sirve para buscar: instrucciones de uso, modos de empleo, "
+        "prospectos, dosis, descripciones de para qué sirve, condiciones de entrega, garantías.\n"
+        "- Si el texto es un prospecto o instrucción (ej. de un medicamento o insumo), extrae "
+        "el NOMBRE del producto en sí, no su modo de uso.\n"
+        "- No inventes marcas que no aparezcan en el texto.\n\n"
+        f"Ítems:\n{_json.dumps(entradas, ensure_ascii=False, indent=2)}\n\n"
+        "Responde SOLO con JSON:\n"
+        '{"terminos": [{"id": 0, "busqueda": "..."}]}'
+    )
+
+    try:
+        response = client.responses.create(
+            model=_MODELO_TERMINOS,
+            input=[{"role": "user", "content": prompt}],
+        )
+        data = _extraer_json(response.output_text) or {}
+        por_id = {
+            int(t["id"]): str(t.get("busqueda", "")).strip()
+            for t in (data.get("terminos") or [])
+            if "id" in t
+        }
+    except Exception as exc:
+        logger.warning("  Normalización de términos falló: %s — usando fallback", exc)
+        por_id = {}
+
+    resultado: dict[str, str] = {}
+    for i, sel in enumerate(seleccionadas):
+        termino = por_id.get(i, "").strip()
+        resultado[sel.item] = termino or _fallback(sel)
+        if termino:
+            logger.info("  Término búsqueda '%s' → '%s'", (sel.item or "")[:40], termino)
+    return resultado
+
+
 # ── PASO 1 — Búsqueda de URLs con gpt-4o-mini + web_search_preview ───────────
 
 def buscar_links_openai(
     seleccionadas: list,
     api_key: str,
+    departamento: str = "",
 ) -> tuple[bool, list[ProductoLinks], str]:
     """
     Llama a gpt-4o-mini con web_search_preview para obtener 9 URLs candidatas
     por producto.  Retorna (ok, productos, resumen).
+
+    Si `departamento` está informado y el producto es un ser vivo (planta, semilla,
+    animal, etc.), las URLs deben ser de vendedores ubicados en ese departamento,
+    ya que los seres vivos son difíciles de transportar.
     """
     try:
         from openai import OpenAI
@@ -152,43 +285,74 @@ def buscar_links_openai(
     client  = OpenAI(api_key=api_key)
     hoy_str = date.today().strftime("%d de %B de %Y")
 
+    # Derivar términos de búsqueda limpios para TODOS los productos (1 sola llamada).
+    terminos = _derivar_terminos_busqueda(seleccionadas, api_key)
+
     productos_out: list[ProductoLinks] = []
     errores: list[str] = []
 
     for sel in seleccionadas:
-        desc = sel.descripcion or sel.item
+        # Término de búsqueda comercial normalizado por IA (general para cualquier producto).
+        desc = terminos.get(sel.item) or (sel.item or "")[:120]
 
-        prompt = f"""Hoy es {hoy_str}. Necesito comprar este producto en Colombia HOY.
+        es_vivo  = _es_producto_ser_vivo(desc)
+        geo_regla = ""
+        geo_nota  = ""
+        if es_vivo and departamento:
+            geo_regla = (
+                f"6. RESTRICCIÓN GEOGRÁFICA OBLIGATORIA: este producto es un ser vivo "
+                f"(planta, semilla, animal, etc.) y DEBE comprarse localmente. "
+                f"TODAS las URLs deben ser de vendedores, viveros, granjas o distribuidores "
+                f"ubicados en el departamento de {departamento} (Colombia). "
+                f"No incluyas tiendas nacionales de e-commerce que no tengan presencia "
+                f"o envío garantizado en {departamento}."
+            )
+            geo_nota = (
+                f"\nBUSCA ESPECÍFICAMENTE en {departamento}: viveros, productores agropecuarios, "
+                f"agrotiendas, cooperativas o distribuidores locales que vendan este producto."
+            )
+            logger.info(
+                "  '%s': producto ser vivo detectado — búsqueda restringida a %s",
+                sel.item, departamento,
+            )
 
-PRODUCTO: {desc}
+        prompt = f"""Hoy es {hoy_str}. Necesito comprar este producto en Colombia.
 
-Busca en internet 9 páginas de tiendas colombianas donde se venda este producto.
-Necesito variedad: mezcla grandes superficies, tiendas especializadas, distribuidores, etc.
+PRODUCTO A BUSCAR: {desc}{geo_nota}
 
-REGLAS obligatorias para cada URL:
-1. URL directa a la ficha del producto (no categorías, no buscadores, no home).
-2. Cada URL de un DOMINIO DISTINTO.
-3. Precio visible en pesos colombianos (COP).
-4. Producto disponible (no agotado).
-5. PROHIBIDO ESTRICTAMENTE: MercadoLibre y TODAS sus variantes (mercadolibre.com.co, mercadolibre.com, meli.com.co, mercadolibre.com.mx, etc.). Cualquier resultado de MercadoLibre será descartado automáticamente. No incluyas ningún link de MercadoLibre bajo ninguna circunstancia.
+USA LA HERRAMIENTA DE BÚSQUEDA WEB para encontrar páginas de tiendas colombianas donde se venda este producto.
+Devuelve hasta 9 URLs de fichas de producto que REALMENTE hayas encontrado en los resultados de búsqueda.
 
-Tiendas sugeridas (no exclusivas): alkosto.com, homecenter.com.co, exito.com,
-falabella.com.co, ktronix.com, panamericana.com.co, jumbo.co, makro.com.co,
-y cualquier tienda especializada del sector.
+═══════════════════════════════════════════════════════
+⛔ REGLA #1 — LA MÁS IMPORTANTE: NO INVENTES URLs
+═══════════════════════════════════════════════════════
+- Cada URL que devuelvas DEBE ser una que apareció literalmente en los resultados de tu búsqueda web.
+- PROHIBIDO construir, adivinar o deducir URLs a partir del nombre de una tienda.
+  Ejemplo de lo que NUNCA debes hacer: inventar "tienda.com/" + nombre-del-producto.
+- PROHIBIDO inventar IDs de producto, slugs o códigos (nada de "/product/1234567/", "/p/n0x1y2", etc.).
+- Si solo encuentras 3 URLs reales, devuelve 3. NUNCA rellenes con URLs inventadas para llegar a un número.
+- Es MUCHO mejor devolver pocas URLs verdaderas que muchas inventadas. Una URL inventada es un error grave.
+- Antes de incluir una URL, verifica mentalmente: "¿esta URL exacta apareció en mi búsqueda?" Si no, descártala.
+
+REGLAS adicionales para cada URL:
+1. Debe llevar a la ficha de UN producto (no a categorías, búsquedas ni home de la tienda).
+2. Preferible cada URL de un dominio distinto, pero pueden repetirse si son productos distintos reales.
+3. PROHIBIDO MercadoLibre y todas sus variantes (mercadolibre.com.co, meli.com.co, etc.).
+{geo_regla}
 
 Responde ÚNICAMENTE con este JSON (sin texto extra, sin ```):
 {{
   "links": [
-    {{"url": "https://...", "precio": "$ 89.900", "precio_numero": 89900, "tienda": "tienda.com"}},
-    ... (9 objetos en total)
+    {{"url": "https://...(url real encontrada en la búsqueda)...", "precio": "$ ...", "precio_numero": null, "tienda": "dominio.com"}}
   ]
 }}
-precio_numero: entero COP sin puntos ni símbolos."""
+Incluye solo las URLs reales que hallaste (pueden ser menos de 9). precio_numero: déjalo en null."""
 
         try:
             response = client.responses.create(
-                model=_MODELO,
+                model=_MODELO_BUSQUEDA,
                 tools=[{"type": "web_search_preview"}],
+                tool_choice={"type": "web_search_preview"},  # OBLIGA a ejecutar la búsqueda web
                 input=[{"role": "user", "content": prompt}],
             )
             text = response.output_text
@@ -205,7 +369,11 @@ precio_numero: entero COP sin puntos ni símbolos."""
 
         links: list[LinkProducto] = []
         dominios_vistos: set[str] = set()
-        for lk in (data.get("links") or [])[:_URLS_INICIALES]:
+        # Itera TODOS los links devueltos (puede ser más de 9) y filtra bloqueados/duplicados.
+        # El corte a _URLS_INICIALES se hace DESPUÉS del filtro para garantizar 9 válidos.
+        for lk in (data.get("links") or []):
+            if len(links) >= _URLS_INICIALES:
+                break
             url = str(lk.get("url", "")).strip()
             if not url:
                 continue
@@ -217,21 +385,30 @@ precio_numero: entero COP sin puntos ni símbolos."""
                 continue
             dominios_vistos.add(dominio)
 
-            precio_num = lk.get("precio_numero")
+            precio_num  = lk.get("precio_numero")
+            precio_txt  = str(lk.get("precio", "") or "")
+
+            # Descartar precios en USD o moneda extranjera
+            if any(s in precio_txt.upper() for s in ("USD", "US$", "EUR", "€", "MXN")):
+                precio_num = None
+                precio_txt = "N/A"
+
             if isinstance(precio_num, float):
                 precio_num = int(precio_num)
-            if precio_num and not _es_precio_razonable(precio_num):
+            if precio_num is not None and not _es_precio_razonable(precio_num):
                 precio_num = None
 
             links.append(LinkProducto(
                 url=url,
-                precio_texto=str(lk.get("precio", "N/A")),
+                precio_texto=precio_txt or "N/A",
                 precio_numero=precio_num,
             ))
 
         if links:
             productos_out.append(ProductoLinks(item=sel.item, descripcion=desc, links=links))
-            logger.info("  '%s': %d URL(s) candidatas", sel.item, len(links))
+            logger.info("  '%s': %d/%d URL(s) candidatas obtenidas", sel.item, len(links), _URLS_INICIALES)
+            if len(links) < _URLS_INICIALES:
+                logger.warning("  '%s': solo %d links (objetivo: %d) — posibles dominios bloqueados o respuesta incompleta", sel.item, len(links), _URLS_INICIALES)
         else:
             logger.warning("  '%s': sin enlaces en la respuesta", sel.item)
             errores.append(f"Sin enlaces para {sel.item}")
@@ -324,10 +501,11 @@ def _screenshot_una_url(
     page,
     url: str,
     dir_out: Path,
-) -> tuple[Path | None, str | None, int | None]:
+) -> tuple[Path | None, str | None, str | None, int | None]:
     """
     Navega a la URL, extrae precio con DOM y toma screenshot.
-    Retorna (ruta_png, precio_texto, precio_numero).
+    Retorna (ruta_png, base64_png, precio_texto, precio_numero).
+    El base64 se usa para enviar la captura como IMAGEN a la visión (más fiable que PDF).
     """
     fname = hashlib.md5(url.encode()).hexdigest()[:12] + ".png"
     ruta  = dir_out / fname
@@ -335,14 +513,15 @@ def _screenshot_una_url(
         page.goto(url, timeout=30_000, wait_until="domcontentloaded")
         page.wait_for_timeout(2500)
 
-        # Precio DOM (respaldo por si el PDF no lo lee bien)
+        # Precio DOM (respaldo por si la visión no lo lee bien)
         precio_txt, precio_num = _extraer_precio_dom(page)
         page.screenshot(path=str(ruta), full_page=False)
-        return ruta, precio_txt, precio_num
+        b64 = base64.b64encode(ruta.read_bytes()).decode()
+        return ruta, b64, precio_txt, precio_num
 
     except Exception as exc:
         logger.warning("  Screenshot error %s: %s", url, exc)
-        return None, None, None
+        return None, None, None, None
 
 
 def _extraer_precio_dom(page) -> tuple[str | None, int | None]:
@@ -397,145 +576,112 @@ def _extraer_precio_dom(page) -> tuple[str | None, int | None]:
     return None, None
 
 
-# ── PASO 2b — Armar PDF con capturas de la ronda ─────────────────────────────
+# ── PASO 2b/2c — Verificación visual de capturas (IMÁGENES, no PDF) ───────────
 
-def _crear_pdf_capturas(
-    capturas: list[tuple[str, Path | None]],   # [(url, ruta_png), ...]
-) -> bytes | None:
-    """
-    Crea un PDF (una captura por página) usando Pillow.
-    Retorna los bytes del PDF o None si no hay imágenes.
-    """
-    try:
-        from PIL import Image
-    except ImportError:
-        logger.error("Pillow no instalado (pip install Pillow)")
-        return None
-
-    pages: list = []
-    for _url, ruta in capturas:
-        if ruta and ruta.exists():
-            try:
-                img = Image.open(str(ruta)).convert("RGB")
-                pages.append(img)
-            except Exception as exc:
-                logger.warning("  PDF: no se pudo cargar imagen %s: %s", ruta, exc)
-
-    if not pages:
-        return None
-
-    buf = io.BytesIO()
-    pages[0].save(buf, format="PDF", save_all=True, append_images=pages[1:])
-    return buf.getvalue()
-
-
-# ── PASO 2c — GPT analiza el PDF y decide cuáles capturas sirven ─────────────
-
-def _analizar_pdf_con_gpt(
-    pdf_bytes: bytes,
-    urls: list[str],
+def _verificar_con_vision(
     descripcion: str,
+    capturas: list[tuple[str, str]],   # [(url, base64_png), ...]
     api_key: str,
 ) -> list[dict]:
     """
-    Envía el PDF a gpt-4o-mini vía Responses API.
-    Cada página del PDF = una captura de pantalla (en el orden de `urls`).
+    Envía las capturas como IMÁGENES a la visión para verificar cada página y
+    extraer el precio. Enviar imágenes individuales (no un PDF) es más fiable:
+    evita las negativas del modelo ("no puedo analizar PDFs") y mejora la lectura.
 
-    Retorna lista de dicts para las páginas válidas:
-      [{url, precio_texto, precio_numero}, ...]
+    Criterio de validez (NO ser rígido — productos similares SÍ valen):
+      - válido: ficha de producto igual, similar, equivalente o del mismo sector.
+      - inválido SOLO si: página en blanco / error 404 / CAPTCHA / listado-categoría /
+        producto de categoría completamente distinta.
+
+    Retorna lista de dicts: {url, valido, precio_texto, precio_numero, motivo}.
     """
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
 
-    pdf_b64   = base64.b64encode(pdf_bytes).decode()
-    lista_pag = "\n".join(f"  Página {i+1}: {u}" for i, u in enumerate(urls))
-
-    prompt = f"""Este PDF contiene {len(urls)} capturas de pantalla de páginas web de tiendas colombianas.
+    n = len(capturas)
+    prompt_texto = f"""Eres un verificador de páginas de e-commerce colombianas.
 
 Producto buscado: "{descripcion}"
 
-Correspondencia páginas → URLs:
-{lista_pag}
+Analiza las {n} captura(s) de pantalla y para CADA UNA devuelve un objeto JSON con:
 
-Para CADA página evalúa:
-1. ¿Muestra una ficha de producto que corresponde a "{descripcion}" (o equivalente)?
-2. ¿Cuál es el precio principal de venta en pesos colombianos (COP)?
+1. "valido" (boolean):
+   - true si la captura muestra una FICHA de producto que corresponde a "{descripcion}"
+     o a un producto SIMILAR, EQUIVALENTE o DEL MISMO SECTOR/CATEGORÍA,
+     QUE ESTÉ DISPONIBLE PARA COMPRA Y CON PRECIO VISIBLE.
+     NO tiene que ser idéntico: distinta marca, modelo, presentación o tamaño SÍ vale.
+   - false si: página en blanco, error 404/"no encontrado", CAPTCHA, pantalla de
+     carga, listado de categorías/búsqueda (sin ficha), o un producto de una categoría
+     completamente distinta (ej: se busca herramienta y aparece ropa).
+   - false TAMBIÉN si: el producto está AGOTADO o SIN STOCK ("producto sin stock",
+     "agotado", "no disponible"), o la imagen es un PLACEHOLDER sin foto real del producto
+     (ej: "Estamos preparando la imagen de este producto"), o NO se ve ningún precio.
+     Estos casos NO sirven como cotización y deben marcarse false.
 
-En Colombia los precios usan PUNTOS como separadores de miles: $ 1.234.567
-Busca el precio prominente junto al nombre del producto, no precios tachados ni de recomendados.
+2. "precio_texto" (string o null): el precio PRINCIPAL de venta visible, formato colombiano
+   con puntos de miles (ej: "$ 1.234.567", "$ 89.900"). En Colombia los puntos separan miles.
+   Ignora precios tachados. Si NO hay precio visible, null (y la página NO es válida).
 
-Devuelve SOLO este JSON (sin texto adicional):
-{{
-  "validos": [
-    {{
-      "pagina": 1,
-      "url": "url exacta copiada de la lista de arriba",
-      "precio_texto": "$ 1.234.567",
-      "precio_numero": 1234567
-    }}
-  ],
-  "hay_suficientes": true
-}}
+3. "precio_numero" (integer o null): el mismo precio como entero sin puntos ni símbolos
+   (ej: "$ 1.234.567" → 1234567). El número REAL que ves; si no lo ves, null. NO copies ejemplos.
 
-Reglas:
-- Incluir en "validos" solo páginas que SÍ muestran el producto correcto.
-- Si el precio no es legible en la imagen, igual incluye la página en "validos" con precio_texto y precio_numero en null.
-- "hay_suficientes": true si hay 3 o más páginas válidas.
-- precio_numero: entero sin puntos (1234567, no "1.234.567")."""
+4. "motivo" (string o null): si "valido" es false, explica brevemente por qué; si true, null.
+
+Responde ÚNICAMENTE con un array JSON de {n} objeto(s) en el MISMO ORDEN que las imágenes,
+sin texto adicional. Ejemplo para 2 imágenes:
+[
+  {{"valido": true, "precio_texto": "$ 1.234.567", "precio_numero": 1234567, "motivo": null}},
+  {{"valido": false, "precio_texto": null, "precio_numero": null, "motivo": "error 404"}}
+]"""
+
+    content: list[dict] = [{"type": "text", "text": prompt_texto}]
+    for _url, b64 in capturas:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{b64}", "detail": "high"},
+        })
 
     try:
-        response = client.responses.create(
-            model=_MODELO,
-            input=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_file",
-                        "filename": "capturas.pdf",
-                        "file_data": f"data:application/pdf;base64,{pdf_b64}",
-                    },
-                    {
-                        "type": "input_text",
-                        "text": prompt,
-                    },
-                ],
-            }],
+        resp = client.chat.completions.create(
+            model=_MODELO_ANALISIS,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=1000,
         )
-        texto = response.output_text
-        logger.debug("GPT-PDF respuesta: %s", texto[:500])
+        texto = resp.choices[0].message.content or ""
+        logger.debug("Vision respuesta: %s", texto[:500])
         datos = _extraer_json(texto)
 
-        if datos and isinstance(datos, dict):
+        if isinstance(datos, list) and len(datos) == n:
             resultado = []
-            for v in (datos.get("validos") or []):
-                pagina = int(v.get("pagina", 0)) - 1   # 0-based
-                if not (0 <= pagina < len(urls)):
-                    continue
-                # Usar la URL de la lista (más fiable que lo que devuelva el modelo)
-                url_real   = urls[pagina]
-                precio_num = v.get("precio_numero")
+            for i, d in enumerate(datos):
+                precio_num = d.get("precio_numero")
                 if isinstance(precio_num, float):
                     precio_num = int(precio_num)
                 if precio_num and not _es_precio_razonable(precio_num):
-                    logger.warning("GPT-PDF: precio fuera de rango (%s) descartado", precio_num)
+                    logger.warning("Vision: precio fuera de rango (%s) descartado", precio_num)
                     precio_num = None
                 resultado.append({
-                    "url":           url_real,
-                    "precio_texto":  v.get("precio_texto"),
+                    "url":           capturas[i][0],
+                    "valido":        bool(d.get("valido")),
+                    "precio_texto":  d.get("precio_texto"),
                     "precio_numero": precio_num,
+                    "motivo":        d.get("motivo") or "",
                 })
-            logger.info(
-                "GPT-PDF: %d/%d páginas válidas (hay_suficientes=%s)",
-                len(resultado), len(urls), datos.get("hay_suficientes"),
-            )
             return resultado
 
-        logger.warning("GPT-PDF: respuesta inesperada: %s", texto[:300])
-
+        logger.warning(
+            "Vision: array de longitud inesperada (esperado %d). Respuesta: %s",
+            n, texto[:200],
+        )
     except Exception as exc:
-        logger.error("Error analizando PDF con GPT: %s", exc)
+        logger.error("Vision API error: %s", exc)
 
-    return []
+    # Fallback conservador: marcar inválidos (no inflar el Excel con capturas dudosas)
+    return [
+        {"url": url, "valido": False, "precio_texto": None, "precio_numero": None,
+         "motivo": "verificación de visión no disponible"}
+        for url, _ in capturas
+    ]
 
 
 # ── PASO 2d — Búsqueda de URLs adicionales ───────────────────────────────────
@@ -545,10 +691,12 @@ def _buscar_links_reemplazo(
     n: int,
     excluir: set[str],
     api_key: str,
+    departamento: str = "",
 ) -> list[str]:
     """
-    Pide a gpt-4o-mini + web_search_preview exactamente N URLs nuevas,
-    excluyendo los dominios ya intentados.
+    Busca con web_search hasta N URLs nuevas reales, excluyendo dominios ya intentados.
+    Devuelve solo URLs realmente encontradas (puede ser menos de N); nunca inventadas.
+    Si `departamento` informado y el producto es ser vivo, restringe a ese departamento.
     """
     from openai import OpenAI
     client = OpenAI(api_key=api_key)
@@ -558,26 +706,45 @@ def _buscar_links_reemplazo(
         for u in excluir
     })
 
+    es_vivo   = _es_producto_ser_vivo(descripcion)
+    geo_regla = ""
+    geo_nota  = ""
+    if es_vivo and departamento:
+        geo_regla = (
+            f"5. RESTRICCIÓN GEOGRÁFICA OBLIGATORIA: este producto es un ser vivo. "
+            f"TODOS los links deben ser de vendedores ubicados en el departamento de "
+            f"{departamento} (Colombia). Busca viveros, granjas, agrotiendas o "
+            f"distribuidores locales en {departamento}.\n"
+        )
+        geo_nota = f" en el departamento de {departamento}"
+
     prompt = (
-        f"Necesito {n} URL(s) alternativa(s) de tiendas colombianas para:\n"
+        f"USA LA HERRAMIENTA DE BÚSQUEDA WEB para encontrar tiendas colombianas{geo_nota} que vendan:\n"
         f"PRODUCTO: {descripcion}\n\n"
+        f"CONTEXTO: Ya intenté los dominios de abajo y fallaron. Busca en OTRAS tiendas distintas.\n"
         f"Dominios ya intentados (NO repetir): {', '.join(excluir_dominios) or 'ninguno'}\n\n"
-        f"REGLAS:\n"
-        f"1. URL directa a la ficha del producto.\n"
-        f"2. Dominio DIFERENTE a los excluidos.\n"
-        f"3. Precio en COP, producto en stock.\n"
-        f"4. PROHIBIDO ESTRICTAMENTE: MercadoLibre y TODAS sus variantes "
-        f"(mercadolibre.com.co, mercadolibre.com, meli.com.co, mercadolibre.com.mx, etc.). "
-        f"Cualquier resultado de MercadoLibre será descartado automáticamente. "
-        f"No incluyas ningún link de MercadoLibre bajo ninguna circunstancia.\n\n"
-        f"Responde SOLO con JSON:\n"
-        f'{{"links":[{{"url":"https://...","precio":"$ 89.900","precio_numero":89900}}]}}'
+        f"⛔ REGLA MÁS IMPORTANTE — NO INVENTES URLs NI DOMINIOS:\n"
+        f"- Cada URL debe haber aparecido LITERALMENTE en los resultados de tu búsqueda web.\n"
+        f"- PROHIBIDO inventar nombres de tiendas o dominios (ej: 'agroferreteria.com.co', "
+        f"'maquinariapesada.com.co' y similares inventados NO existen y rompen el proceso).\n"
+        f"- PROHIBIDO construir URLs pegando el nombre del producto al dominio de una tienda.\n"
+        f"- PROHIBIDO inventar IDs, slugs o códigos de producto.\n"
+        f"- Si solo encuentras 1 o 2 URLs reales, devuelve solo esas. NUNCA rellenes con inventadas.\n"
+        f"- Una sola URL inventada es un error grave. Prefiero pocas reales que muchas falsas.\n\n"
+        f"REGLAS adicionales:\n"
+        f"1. URL directa a la ficha de UN producto (no categorías, no home, no búsquedas).\n"
+        f"2. Dominio diferente a los ya intentados.\n"
+        f"3. PROHIBIDO MercadoLibre y todas sus variantes.\n"
+        f"{geo_regla}"
+        f"\nResponde SOLO con JSON (solo las URLs reales halladas, pueden ser menos de {n}):\n"
+        f'{{"links":[{{"url":"https://...(url real de la búsqueda)...","precio":"$ ...","precio_numero":null}}]}}'
     )
 
     try:
         response = client.responses.create(
-            model=_MODELO,
+            model=_MODELO_BUSQUEDA,
             tools=[{"type": "web_search_preview"}],
+            tool_choice={"type": "web_search_preview"},  # OBLIGA a ejecutar la búsqueda web
             input=[{"role": "user", "content": prompt}],
         )
         data = _extraer_json(response.output_text)
@@ -604,14 +771,15 @@ def tomar_screenshots(
     productos: list[ProductoLinks],
     dir_out: Path,
     api_key: str = "",
+    departamento: str = "",
 ) -> tuple[list[ProductoLinks], dict[str, ResultadoScreenshot]]:
     """
     Para cada producto:
       Ronda 1+:
-        a. Playwright visita todas las URLs pendientes → capturas en disco.
-        b. Se ensambla un PDF con las capturas de esta ronda.
-        c. gpt-4o-mini analiza el PDF → identifica válidas + precios.
-        d. Si < 3 válidas → buscar N URLs más → nueva ronda.
+        a. Playwright visita todas las URLs pendientes → screenshot + precio DOM + base64.
+        b. La visión recibe las capturas como IMÁGENES → valida producto + extrae precio.
+        c. Los válidos se acumulan; si faltan, se piden URLs de reemplazo → nueva ronda.
+        d. Se detiene al alcanzar el mínimo de capturas válidas o agotar las rondas.
       Máx _MAX_RONDAS rondas en total.
 
     Retorna (productos_actualizados, {url: ResultadoScreenshot}).
@@ -619,8 +787,6 @@ def tomar_screenshots(
     from playwright.sync_api import sync_playwright
 
     dir_out.mkdir(parents=True, exist_ok=True)
-    dir_pdfs = dir_out / "_pdfs_analisis"
-    dir_pdfs.mkdir(exist_ok=True)
 
     res: dict[str, ResultadoScreenshot]  = {}
     productos_actualizados: list[ProductoLinks] = []
@@ -669,54 +835,55 @@ def tomar_screenshots(
                         producto.item, ronda, _MAX_RONDAS, len(urls_pendientes),
                     )
 
-                    # ── a. Playwright: screenshots ────────────────────────────
-                    capturas_ronda: list[tuple[str, Path | None]] = []
+                    # ── a. Playwright: screenshot + precio DOM + base64 ───────
+                    # ruta/b64/precio por URL para esta ronda
+                    datos_ronda: dict[str, tuple] = {}
                     for url in urls_pendientes:
-                        ruta, p_txt, p_num = _screenshot_una_url(page, url, dir_out)
-                        capturas_ronda.append((url, ruta))
-                        precio_dom[url] = (p_txt, p_num)
-                        if ruta:
-                            res[url] = ResultadoScreenshot(ruta, p_txt, p_num, False)
-                        else:
-                            res[url] = ResultadoScreenshot(None, None, None, False)
+                        ruta, b64, p_txt, p_num = _screenshot_una_url(page, url, dir_out)
+                        datos_ronda[url] = (ruta, b64, p_txt, p_num)
+                        precio_dom[url]  = (p_txt, p_num)
 
-                    # ── b. Armar PDF ──────────────────────────────────────────
-                    pdf_bytes = _crear_pdf_capturas(capturas_ronda)
-
-                    if pdf_bytes:
-                        pdf_path = dir_pdfs / (
-                            hashlib.md5(producto.item.encode()).hexdigest()[:8]
-                            + f"_r{ronda}.pdf"
-                        )
-                        pdf_path.write_bytes(pdf_bytes)
-                        logger.info("  [%s] PDF generado: %s", producto.item, pdf_path.name)
-
-                    # ── c. GPT analiza el PDF ─────────────────────────────────
-                    urls_ronda = [url for url, _ in capturas_ronda]
-
-                    if api_key and pdf_bytes:
-                        validos_gpt = _analizar_pdf_con_gpt(pdf_bytes, urls_ronda, desc, api_key)
+                    # ── b. Verificación visual por IMÁGENES (no PDF) ──────────
+                    capturas_img = [
+                        (url, b64) for url, (_, b64, _, _) in datos_ronda.items() if b64
+                    ]
+                    if api_key and capturas_img:
+                        verifs = _verificar_con_vision(desc, capturas_img, api_key)
+                        verif_por_url = {v["url"]: v for v in verifs}
                     else:
                         # Sin IA: aceptar todas las que tienen captura
-                        validos_gpt = [
-                            {"url": url, "precio_texto": None, "precio_numero": None}
-                            for url, ruta in capturas_ronda
-                            if ruta
-                        ]
+                        verif_por_url = {
+                            url: {"valido": True, "precio_texto": None, "precio_numero": None, "motivo": ""}
+                            for url, (ruta, _, _, _) in datos_ronda.items() if ruta
+                        }
 
-                    # Registrar resultados de esta ronda
-                    urls_invalidas = set(urls_ronda)
-                    for v in validos_gpt:
-                        url        = v["url"]
-                        ruta       = next((r for u, r in capturas_ronda if u == url), None)
-                        p_txt_dom, p_num_dom = precio_dom.get(url, (None, None))
+                    # ── c. Clasificar válidos / inválidos ─────────────────────
+                    for url, (ruta, _b64, p_txt_dom, p_num_dom) in datos_ronda.items():
+                        verif = verif_por_url.get(url)
 
-                        # GPT tiene prioridad de precio (lee la imagen); DOM como respaldo
-                        precio_num = v["precio_numero"] or p_num_dom
-                        precio_txt = v["precio_texto"]  or p_txt_dom
+                        if not verif or not verif.get("valido"):
+                            res[url] = ResultadoScreenshot(None, None, None, False)
+                            motivo = (verif or {}).get("motivo", "captura no disponible")
+                            logger.warning("  [%s] ✗ inválido (%s): %s", producto.item, motivo, url)
+                            continue
+
+                        # La visión lee la MISMA imagen que va al Excel → fuente de verdad.
+                        # DOM como respaldo solo si la visión no extrajo precio.
+                        precio_num = verif.get("precio_numero") or p_num_dom
+                        precio_txt = verif.get("precio_texto")  or p_txt_dom
                         if precio_num and not _es_precio_razonable(precio_num):
                             precio_num = None
                             precio_txt = None
+
+                        # Regla obligatoria: una cotización SOLO cuenta si tiene precio real.
+                        # Sin precio (captura vacía, placeholder, sin stock) NO sirve como
+                        # referencia → no cuenta para las 3 y disparará completación manual.
+                        if not precio_num:
+                            res[url] = ResultadoScreenshot(None, None, None, False)
+                            logger.warning(
+                                "  [%s] ✗ sin precio (no cuenta): %s", producto.item, url
+                            )
+                            continue
 
                         res[url] = ResultadoScreenshot(
                             ruta=ruta,
@@ -729,36 +896,39 @@ def tomar_screenshots(
                             precio_texto=precio_txt or "N/A",
                             precio_numero=precio_num,
                         ))
-                        urls_invalidas.discard(url)
                         logger.info(
-                            "  [%s] ✓ válido (%d/3): %s → %s",
-                            producto.item, len(links_validos), url,
-                            precio_txt or "sin precio",
+                            "  [%s] ✓ válido (%d/%d): %s → %s",
+                            producto.item, len(links_validos), _MIN_VALIDOS, url,
+                            precio_txt,
                         )
-
-                    for url in urls_invalidas:
-                        logger.warning("  [%s] ✗ inválido: %s", producto.item, url)
 
                     rondas_ok += 1
 
                     # ── d. ¿Tenemos suficientes? ──────────────────────────────
-                    needed = 3 - len(links_validos)
+                    needed = _MIN_VALIDOS - len(links_validos)
                     if needed <= 0:
-                        logger.info("  [%s] 3/3 válidos — listo.", producto.item)
+                        logger.info("  [%s] %d/%d válidos — listo.", producto.item, len(links_validos), _MIN_VALIDOS)
                         break
 
                     if ronda >= _MAX_RONDAS:
                         logger.warning(
-                            "  [%s] Límite de rondas alcanzado con %d/3 válidos.",
-                            producto.item, len(links_validos),
+                            "  [%s] Límite de rondas alcanzado con %d/%d válidos.",
+                            producto.item, len(links_validos), _MIN_VALIDOS,
                         )
                         break
 
                     if not api_key:
                         break
 
-                    logger.info("  [%s] Buscando %d URL(s) de reemplazo...", producto.item, needed)
-                    nuevas = _buscar_links_reemplazo(desc, needed, urls_intentadas, api_key)
+                    # Pedir un BUFFER de reemplazos (no solo los que faltan): muchas URLs
+                    # fallan al capturar/validar, así que pedimos de sobra para que cada
+                    # ronda tenga opciones reales de completar el mínimo de 3.
+                    n_pedir = max(needed * 3, 6)
+                    logger.info(
+                        "  [%s] Faltan %d — buscando %d URL(s) de reemplazo...",
+                        producto.item, needed, n_pedir,
+                    )
+                    nuevas = _buscar_links_reemplazo(desc, n_pedir, urls_intentadas, api_key, departamento)
                     nuevas = [_normalizar_url(u) for u in nuevas if u not in urls_intentadas]
                     if not nuevas:
                         logger.warning("  [%s] Sin reemplazos disponibles.", producto.item)
@@ -767,14 +937,20 @@ def tomar_screenshots(
                     urls_pendientes = nuevas
                     urls_intentadas.update(nuevas)
 
-                logger.info(
-                    "  [%s] Final: %d/3 válidos tras %d ronda(s).",
-                    producto.item, len(links_validos), rondas_ok,
-                )
+                if len(links_validos) < _MIN_VALIDOS:
+                    logger.warning(
+                        "  [%s] ⚠ Final: solo %d/%d válidos tras %d ronda(s) — NO cumple el mínimo.",
+                        producto.item, len(links_validos), _MIN_VALIDOS, rondas_ok,
+                    )
+                else:
+                    logger.info(
+                        "  [%s] Final: %d/%d válidos tras %d ronda(s).",
+                        producto.item, len(links_validos), _MIN_VALIDOS, rondas_ok,
+                    )
                 productos_actualizados.append(ProductoLinks(
                     item=producto.item,
                     descripcion=producto.descripcion,
-                    links=links_validos[:3],
+                    links=links_validos[:_MIN_VALIDOS],
                 ))
 
             browser.close()
@@ -928,10 +1104,13 @@ def generar_excel_cotizaciones(
     from openpyxl.drawing.image import Image as XLImage
 
     precio_cotizacion_por_item: dict[str, int] = {}
+    descripcion_original_por_item: dict[str, str] = {}
     if seleccionadas:
         for sel in seleccionadas:
             if sel.valor_total:
                 precio_cotizacion_por_item[sel.item] = sel.valor_total
+            if sel.descripcion:
+                descripcion_original_por_item[sel.item] = sel.descripcion
 
     alertas_desviacion: list[str] = []
 
@@ -964,7 +1143,7 @@ def generar_excel_cotizaciones(
     ws_i["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws_i.row_dimensions[1].height = 32
 
-    ws_i["A2"].value = f"Generado: {hoy}  |  Modelo: {_MODELO}"
+    ws_i["A2"].value = f"Generado el  {hoy}"
     ws_i["A2"].font  = _font(size=10, color="555555")
     ws_i.row_dimensions[2].height = 16
 
@@ -976,8 +1155,9 @@ def generar_excel_cotizaciones(
     ws_i.row_dimensions[4].height = 18
 
     for r, prod in enumerate(productos, 5):
+        desc_display = descripcion_original_por_item.get(prod.item) or prod.descripcion or ""
         ws_i.cell(row=r, column=1, value=prod.item)
-        ws_i.cell(row=r, column=2, value=prod.descripcion or "")
+        ws_i.cell(row=r, column=2, value=desc_display)
         ws_i.cell(row=r, column=3, value=_sheet_name(prod.item))
     ws_i.column_dimensions["A"].width = 35
     ws_i.column_dimensions["B"].width = 60
@@ -999,7 +1179,8 @@ def generar_excel_cotizaciones(
         ws.row_dimensions[1].height = 30
 
         ws.merge_cells("A2:C2")
-        ws["A2"].value = f"Descripción: {prod.descripcion or 'N/A'}"
+        _desc_orig = descripcion_original_por_item.get(prod.item) or prod.descripcion or "N/A"
+        ws["A2"].value = f"Descripción: {_desc_orig}"
         ws["A2"].font  = _font(size=10)
         ws.merge_cells("D2:E2")
         ws["D2"].value     = f"Fecha: {hoy}  |  ID: {id_unico}"
@@ -1035,12 +1216,15 @@ def generar_excel_cotizaciones(
             url_cell.fill      = _fill(bg)
 
             ss = screenshots.get(link.url, ResultadoScreenshot(None, None, None, False))
-            if ss.precio_texto:
-                precio_mostrar = ss.precio_texto
-                precio_fuente  = "precio actual página"
+            # El precio SOLO se acepta si proviene de la página real:
+            #  - ss.precio_numero: leído del DOM (JSON-LD/HTML) o de la visión sobre el screenshot.
+            # Nunca se usa el precio "adivinado" por el web search (no es un dato verificable).
+            if ss.precio_numero:
+                precio_mostrar = ss.precio_texto or _formatear_cop(ss.precio_numero)
+                precio_fuente  = "precio leído de la página"
             else:
-                precio_mostrar = link.precio_texto or "No disponible"
-                precio_fuente  = "precio referencia IA"
+                precio_mostrar = "No disponible"
+                precio_fuente  = "no se pudo leer de la página"
 
             precio_cell           = ws.cell(row=current_row, column=3, value=precio_mostrar)
             precio_cell.font      = _font(bold=True, size=11)
@@ -1077,9 +1261,10 @@ def generar_excel_cotizaciones(
         # ── Análisis de desviación ────────────────────────────────────────
         # Los precios de internet son UNITARIOS; el valor_total de la cotización
         # incluye N unidades (parseadas del nombre del ítem).
+        # SOLO se usan precios leídos de la página real (DOM/visión), nunca el
+        # precio adivinado por el web search.
         precios_unitarios_internet = [
             (screenshots.get(lk.url) or ResultadoScreenshot(None, None, None, False)).precio_numero
-            or lk.precio_numero
             for lk in prod.links
         ]
         precio_cotiz = precio_cotizacion_por_item.get(prod.item)

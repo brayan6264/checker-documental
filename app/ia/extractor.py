@@ -123,36 +123,38 @@ def _extraer_pdf(ruta: Path) -> str:
 
 def _ocr_pdf(doc, ruta: Path) -> str:
     """
-    Renderiza cada página del PDF como imagen y aplica Tesseract OCR.
-    Usa 300 DPI para buena precisión en documentos escaneados.
+    OCR rápido y de calidad: 400 DPI, binarización + LSTM (OEM 3, PSM 6).
+    Un solo pase por página — si el resultado es insuficiente el llamador
+    escala a GPT directamente en lugar de reintentar con más combinaciones.
     """
     try:
         import pytesseract
-        from PIL import Image
+        from PIL import Image, ImageEnhance
         import io
+        import os
     except ImportError:
         logger.warning("pytesseract/Pillow no instalados (pip install pytesseract pillow). Sin OCR.")
         return ""
 
-    # Apuntar al ejecutable en Windows si no está en el PATH
-    import os
     if os.path.exists(_TESSERACT_CMD):
         pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
 
     partes: list[str] = []
     for i, pagina in enumerate(doc):
         try:
-            pix = pagina.get_pixmap(dpi=300)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            # spa+eng: español primero, inglés como respaldo para números y siglas
-            texto = pytesseract.image_to_string(img, lang="spa+eng", config="--psm 1")
-            partes.append(texto)
-            logger.debug("  OCR pág %d/%d de '%s': %d chars", i + 1, len(doc), ruta.name, len(texto))
+            pix  = pagina.get_pixmap(dpi=400)
+            img  = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+            # Binarización suave: realza contraste antes de umbralizar
+            img  = ImageEnhance.Contrast(img).enhance(2.0)
+            img  = img.point(lambda p: 0 if p < 150 else 255, "1").convert("RGB")
+            texto = pytesseract.image_to_string(img, config="--oem 3 --psm 6 -l spa+eng")
+            partes.append(texto.strip())
+            logger.debug("  OCR pág %d/%d '%s': %d chars", i + 1, len(doc), ruta.name, len(texto))
         except Exception as exc:
-            logger.warning("  OCR error pág %d de '%s': %s", i + 1, ruta.name, exc)
+            logger.warning("  OCR error pág %d '%s': %s", i + 1, ruta.name, exc)
 
     resultado = "\n".join(partes).strip()
-    logger.info("  OCR completado '%s': %d chars totales", ruta.name, len(resultado))
+    logger.info("  OCR '%s': %d chars totales", ruta.name, len(resultado))
     return resultado
 
 

@@ -680,6 +680,8 @@ def descargar_carpeta_04(url: str, dest_base: Path, id_unico: str) -> dict:
         "sub01_encontrada": False,
         "archivos":         [],
         "conteo":           0,
+        "archivos_02":      [],   # PDFs/archivos de 02_COTIZACIONES_Y_COMPRA (árbol completo)
+        "sub02_encontrada": False,
     }
 
     sess           = _nueva_sesion()
@@ -693,13 +695,44 @@ def descargar_carpeta_04(url: str, dest_base: Path, id_unico: str) -> dict:
     resultado["encontrada"] = True
     logger.info("Carpeta 04 encontrada: %s", rel_04)
 
-    # Buscar subcarpeta que empieza con "01" dentro de 04
+    # Buscar subcarpetas dentro de 04 (01_* y 02_*)
     try:
         subcarpetas_04, _ = _listar_carpeta(sess, host, web, rel_04)
     except Exception as exc:
         logger.warning("Error listando 04 '%s': %s", rel_04, exc)
         return resultado
 
+    # ── Subcarpeta 02_COTIZACIONES_Y_COMPRA: descargar árbol completo ─────────
+    rel_sub02 = None
+    for rel_sub in subcarpetas_04:
+        nombre_sub = normalizar(rel_sub.rstrip("/").split("/")[-1])
+        if nombre_sub.startswith("02"):
+            rel_sub02 = rel_sub
+            break
+
+    if rel_sub02 is not None:
+        nombre_sub02 = urllib.parse.unquote(rel_sub02.rstrip("/").split("/")[-1])
+        dest_02 = dest_base / nombre_sub02
+        dest_02.mkdir(parents=True, exist_ok=True)
+        try:
+            archivos_srel_02 = _listar_arbol(sess, host, web, rel_sub02)
+            descargados_02: list[Path] = []
+            for srel in archivos_srel_02:
+                destino = _srel_a_path(srel, rel_sub02, dest_02)
+                if _bajar_archivo(sess, host, srel, destino) >= 0:
+                    descargados_02.append(destino)
+            resultado["archivos_02"]      = descargados_02
+            resultado["sub02_encontrada"] = True
+            logger.info(
+                "  04/%s: %d/%d archivo(s) descargado(s)",
+                nombre_sub02, len(descargados_02), len(archivos_srel_02),
+            )
+        except Exception as exc:
+            logger.warning("Error descargando 02_COTIZACIONES '%s': %s", rel_sub02, exc)
+    else:
+        logger.warning("No se encontró subcarpeta 02_* dentro de 04: %s", rel_04)
+
+    # Buscar subcarpeta que empieza con "01" dentro de 04
     rel_sub01 = None
     for rel_sub in subcarpetas_04:
         nombre_sub = normalizar(rel_sub.rstrip("/").split("/")[-1])

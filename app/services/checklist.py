@@ -30,12 +30,14 @@ _TEAL     = "FF1F5C6B"   # encabezado 03 Capacitación
 _GRIS     = "FF595959"   # encabezado General
 _ROJO     = "FFFF6B6B"
 _AMARILLO = "FFFFF59D"
+_NARANJA_AT = "FFFFB74D"   # naranja de "atención" (distinto de rojo y amarillo)
 _BLANC    = "FFFFFFFF"
 _NEGRO    = "FF000000"
 
-FILL_LILA     = PatternFill(start_color=_LILA,     end_color=_LILA,     fill_type="solid")
-FILL_ROJO     = PatternFill(start_color=_ROJO,     end_color=_ROJO,     fill_type="solid")
-FILL_AMARILLO = PatternFill(start_color=_AMARILLO, end_color=_AMARILLO, fill_type="solid")
+FILL_LILA       = PatternFill(start_color=_LILA,       end_color=_LILA,       fill_type="solid")
+FILL_ROJO       = PatternFill(start_color=_ROJO,       end_color=_ROJO,       fill_type="solid")
+FILL_AMARILLO   = PatternFill(start_color=_AMARILLO,   end_color=_AMARILLO,   fill_type="solid")
+FILL_ATENCION   = PatternFill(start_color=_NARANJA_AT, end_color=_NARANJA_AT, fill_type="solid")
 
 FONT_HEADER       = Font(name="Arial", size=9,  bold=True,  color=_BLANC)
 FONT_GRUPO        = Font(name="Arial", size=10, bold=True,  color=_BLANC)
@@ -74,11 +76,12 @@ COLUMNAS = [
     "03_MODULOS",
     "03_ASISTENCIA",
     # Carpeta 04 (Capitalización)
-    "04_XLSX",
-    "04_PDF",
-    "04_FIRMAS",
-    "04_COTIZACION",
-    "04_WEB",
+    "04_PLAN_INVERSION_ENCONTRADO",
+    "04_PDF_APROBACION_ENCONTRADO",
+    "04_PDF_APROBACION_FIRMADO",
+    "04_CONSISTENCIA_COTIZACION_GANADORA",
+    "04_COTIZACIONES (carpeta 02)",
+    "04_VALIDACION_PRECIO_MERCADO",
     # General
     "observaciones",
 ]
@@ -95,11 +98,12 @@ _ANCHOS_MIN = {
     "03_ENCUESTAS":      25, "03_GRUPAL":       18,
     "03_INDIVIDUAL":     18, "03_MODULOS":      50,
     "03_ASISTENCIA":     55,
-    "04_XLSX":           45,
-    "04_PDF":            30,
-    "04_FIRMAS":         30,
-    "04_COTIZACION":     55,
-    "04_WEB":            45,
+    "04_PLAN_INVERSION_ENCONTRADO":           45,
+    "04_PDF_APROBACION_ENCONTRADO":            30,
+    "04_PDF_APROBACION_FIRMADO":         30,
+    "04_CONSISTENCIA_COTIZACION_GANADORA":     55,
+    "04_COTIZACIONES (carpeta 02)":    55,
+    "04_VALIDACION_PRECIO_MERCADO":            45,
     "observaciones":     50,
 }
 
@@ -124,7 +128,7 @@ _COLS_03_IDX = {
     col: COLUMNAS.index(col) + 1
     for col in ("03_ENCUESTAS", "03_GRUPAL", "03_INDIVIDUAL", "03_MODULOS", "03_ASISTENCIA")
 }
-_COLS_04_IDX = {col: COLUMNAS.index(col) + 1 for col in ("04_XLSX", "04_PDF", "04_FIRMAS", "04_COTIZACION", "04_WEB")}
+_COLS_04_IDX = {col: COLUMNAS.index(col) + 1 for col in ("04_PLAN_INVERSION_ENCONTRADO", "04_PDF_APROBACION_ENCONTRADO", "04_PDF_APROBACION_FIRMADO", "04_CONSISTENCIA_COTIZACION_GANADORA", "04_COTIZACIONES (carpeta 02)", "04_VALIDACION_PRECIO_MERCADO")}
 
 # Orden y color de cada grupo-carpeta para la fila de encabezado superior
 _GRUPOS_ORDEN = [
@@ -137,7 +141,7 @@ _GRUPOS_ORDEN = [
                           "02_DIAGNOSTICO", "02_PLAN_NEGOCIO"],                   _MORADO),
     ("03 Capacitación",  ["03_ENCUESTAS", "03_GRUPAL", "03_INDIVIDUAL",
                           "03_MODULOS", "03_ASISTENCIA"],                          _TEAL),
-    ("04 Capitalización", ["04_XLSX", "04_PDF", "04_FIRMAS", "04_COTIZACION", "04_WEB"], _CAFE),
+    ("04 Capitalización", ["04_PLAN_INVERSION_ENCONTRADO", "04_PDF_APROBACION_ENCONTRADO", "04_PDF_APROBACION_FIRMADO", "04_CONSISTENCIA_COTIZACION_GANADORA", "04_COTIZACIONES (carpeta 02)", "04_VALIDACION_PRECIO_MERCADO"], _CAFE),
     ("General",          ["observaciones"],                                        _GRIS),
 ]
 
@@ -200,6 +204,7 @@ class ChecklistWriter:
             resultado.get("04_pdf",             "N/A"),
             resultado.get("04_firmas",          "N/A"),
             resultado.get("04_cotizacion",      "N/A"),
+            resultado.get("04_cotizacion_carpeta", "N/A"),
             resultado.get("04_web",             "N/A"),
             # General
             resultado.get("observaciones", ""),
@@ -282,13 +287,38 @@ class ChecklistWriter:
                 celda.fill = FILL_AMARILLO
                 celda.font = FONT_IA_WARN
 
-        # Rojo en columnas 04 si tienen FALTA
+        # Columnas 04: rojo si FALTA/INCOMPLETA; amarillo si requiere completación manual
+        # La columna de cotizaciones de carpeta 02 se colorea aparte (amarillo).
+        _COL_CARPETA02 = "04_COTIZACIONES (carpeta 02)"
         for col_nombre, col_idx in _COLS_04_IDX.items():
+            if col_nombre == _COL_CARPETA02:
+                continue
             val = str(valores[COLUMNAS.index(col_nombre)])
-            if "FALTA" in val.upper() or "INCOMPLETA" in val.upper():
+            val_up = val.upper()
+            if "COMPLETACIÓN MANUAL" in val_up or "COMPLETACION MANUAL" in val_up:
+                # Caso 04_WEB sin las 3 cotizaciones: amarillo (revisión/completación manual)
+                celda      = self._ws.cell(row=fila_num, column=col_idx)
+                celda.fill = FILL_AMARILLO
+                celda.font = FONT_IA_WARN
+            elif "FALTA" in val_up or "INCOMPLETA" in val_up or "DETENER" in val_up or "NO COINCIDE" in val_up:
                 celda      = self._ws.cell(row=fila_num, column=col_idx)
                 celda.fill = FILL_ROJO
                 celda.font = FONT_FALTA
+
+        # Columna 04_COTIZACIONES (carpeta 02): amarillo si hay algo que revisar
+        val_c02 = str(valores[COLUMNAS.index(_COL_CARPETA02)])
+        if val_c02 and not val_c02.startswith("OK") and not val_c02.startswith("N/A") and val_c02 != "—":
+            celda      = self._ws.cell(row=fila_num, column=_COLS_04_IDX[_COL_CARPETA02])
+            celda.fill = FILL_AMARILLO
+            celda.font = FONT_IA_WARN
+
+        # Naranja de atención en "observaciones" si hay alerta del Excel de capturas
+        # (desviación de precio "04-WEB [...] ALERTA"). Color distinto de rojo/amarillo.
+        obs_val = str(valores[COLUMNAS.index("observaciones")])
+        if "04-WEB" in obs_val and "ALERTA" in obs_val.upper():
+            celda      = self._ws.cell(row=fila_num, column=COLUMNAS.index("observaciones") + 1)
+            celda.fill = FILL_ATENCION
+            celda.font = FONT_IA_WARN
 
         # Auto-fit
         for i, valor in enumerate(valores):
