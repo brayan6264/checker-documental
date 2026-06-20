@@ -800,9 +800,11 @@ class ValidadorDocumental:
                 logger.info("  [%s] 04 — 'Plan de inversión' NO encontrado en PDFs", id_unico)
 
         # ── 3. Verificar firmas en el PDF ────────────────────────────────────
+        firmas_ok = False
         if pdf_para_cruce is not None:
             res_firmas     = verificar_firmas_pdf(pdf_para_cruce)
             firmas_resumen = res_firmas.resumen
+            firmas_ok      = res_firmas.ok
             if not res_firmas.ok:
                 obs.append(f"04 — Firmas: {res_firmas.resumen}")
                 tiene_error = True
@@ -859,39 +861,34 @@ class ValidadorDocumental:
             )
 
         # ── 5. Búsqueda web de precios de referencia ──────────────────────────
+        # PRERREQUISITO: las validaciones previas del flujo 04 deben estar OK.
+        # Si CUALQUIERA tiene alerta, NO se hace análisis de mercado (no tiene
+        # sentido comparar precios si los documentos/cotizaciones no son válidos).
+        # Se detiene en la PRIMERA validación que falle, en orden.
         web_excel_nombre = "N/A"
 
+        # Nota: 04_PDF_APROBACION_FIRMADO (firmas) genera alerta pero NO bloquea
+        # el análisis de mercado — una firma faltante no invalida los precios.
+        _bloqueo_web = None   # razón por la que se omite el análisis de mercado
         if not seleccionadas_xlsx:
-            logger.info(
-                "  [%s] 04 — Búsqueda web omitida: sin cotizaciones seleccionadas",
-                id_unico,
-            )
+            _bloqueo_web = "sin cotizaciones seleccionadas en el XLSX"
+        elif not pdf_plan_ok:
+            _bloqueo_web = "04_PDF_APROBACION_ENCONTRADO con alerta (PDF del plan no hallado)"
+        elif not cot_pdf_ok:
+            _bloqueo_web = "04_CONSISTENCIA_COTIZACION_GANADORA con alerta"
+        elif cotiz_carpeta_detiene or not cotiz_carpeta_ok:
+            _bloqueo_web = "04_COTIZACIONES (carpeta 02) con alerta"
 
-        elif cotiz_carpeta_detiene:
+        if _bloqueo_web is not None:
             obs.append(
-                "04 — PROCESO DETENIDO: falta alguna cotización en "
-                "02_COTIZACIONES_Y_COMPRA — búsqueda web omitida"
+                f"04 — Análisis de mercado OMITIDO: {_bloqueo_web}. "
+                "Corregir las validaciones del flujo 04 antes de generar precios de referencia."
             )
             logger.warning(
-                "  [%s] 04 — Proceso detenido: cotización(es) faltante(s) "
-                "en carpeta 02",
-                id_unico,
+                "  [%s] 04 — Búsqueda web omitida: %s", id_unico, _bloqueo_web,
             )
 
         else:
-            # Si hubo alertas en la cotización ganadora, se deja la observación,
-            # pero igualmente se generan las evidencias web.
-            if not cot_pdf_ok:
-                obs.append(
-                    "04 — Se encontraron alertas en la cotización ganadora; "
-                    "las evidencias web se generaron para revisión manual."
-                )
-                logger.warning(
-                    "  [%s] 04 — Continuando búsqueda web pese a alertas "
-                    "en la cotización ganadora.",
-                    id_unico,
-                )
-
             logger.info(
                 "  [%s] 04 — Iniciando búsqueda web de precios de referencia...",
                 id_unico,
