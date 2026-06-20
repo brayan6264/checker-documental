@@ -11,6 +11,7 @@ Flujo por producto:
   3. generar_excel_cotizaciones() — Excel con capturas válidas + análisis de precio.
 """
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -35,18 +36,36 @@ _MODELO = "gpt-4o-mini"
 #    mucha más fiabilidad que mini → menos falsos válidos y menos falsos inválidos.
 #  - TÉRMINOS: tarea simple de texto, mini es suficiente y barato.
 _MODELO_BUSQUEDA = "gpt-4o"
-_MODELO_ANALISIS = "gpt-4o"
+_MODELO_ANALISIS = "gpt-4o-mini"   # visión: mini es mucho más barato y suficiente para validar capturas
 _MODELO_TERMINOS = "gpt-4o-mini"
 
-# URLs que Playwright visita en la primera ronda
-_URLS_INICIALES = 9
+# URLs que Playwright visita en la primera ronda (optimización de costo/tiempo)
+_URLS_INICIALES = 5
+
+# URLs por ronda de reemplazo (máximo)
+_URLS_POR_RONDA = 5
 
 # Máximo de rondas de búsqueda (inicial + reemplazos).
-# Más rondas = más probabilidad de cumplir el mínimo obligatorio de 3 capturas.
-_MAX_RONDAS = 5
+_MAX_RONDAS = 3
 
 # Mínimo obligatorio de capturas válidas por producto.
 _MIN_VALIDOS = 3
+
+# ── Navegación Playwright (optimización de tiempo) ───────────────────────────
+_NAV_TIMEOUT_MS  = 12_000   # antes 30s; los dominios muertos fallan rápido
+_NAV_WAIT_MS     = 1_000    # antes 2.5s; espera de render más corta
+_CONCURRENCIA_PW = 5        # URLs visitadas en paralelo por ronda
+
+# Dominios que en la práctica siempre dan timeout/bloqueo (anti-bot) y solo
+# desperdician tiempo. Se descartan antes de intentar capturarlos.
+_DOMINIOS_LENTOS = {
+    "jumbo.co", "makro.com.co", "sodimac.com.co", "linio.com.co",
+}
+
+
+def _url_lenta(url: str) -> bool:
+    dominio = urlparse(url).netloc.lower().removeprefix("www.")
+    return any(dominio == b or dominio.endswith("." + b) for b in _DOMINIOS_LENTOS)
 
 # Tiendas reconocidas colombianas con inventario amplio y páginas estables.
 # La ronda 1 prioriza EXCLUSIVAMENTE estas tiendas para maximizar capturas exitosas.
@@ -380,6 +399,9 @@ Incluye solo las URLs reales que hallaste (pueden ser menos de 9). precio_numero
             if _url_bloqueada(url):
                 logger.warning("  URL bloqueada (dominio excluido): %s", url)
                 continue
+            if _url_lenta(url):
+                logger.info("  URL descartada (dominio lento/anti-bot): %s", url)
+                continue
             dominio = urlparse(url).netloc.lower().removeprefix("www.")
             if dominio in dominios_vistos:
                 continue
@@ -495,39 +517,12 @@ _JS_PRECIO_PRINCIPAL = """
     return null;
 }
 """
+# ── PASO 2a — Captura CONCURRENTE de capturas (async, optimización de tiempo) ─
 
-
-def _screenshot_una_url(
-    page,
-    url: str,
-    dir_out: Path,
-) -> tuple[Path | None, str | None, str | None, int | None]:
-    """
-    Navega a la URL, extrae precio con DOM y toma screenshot.
-    Retorna (ruta_png, base64_png, precio_texto, precio_numero).
-    El base64 se usa para enviar la captura como IMAGEN a la visión (más fiable que PDF).
-    """
-    fname = hashlib.md5(url.encode()).hexdigest()[:12] + ".png"
-    ruta  = dir_out / fname
+async def _extraer_precio_dom_async(page) -> tuple[str | None, int | None]:
+    """Versión async de _extraer_precio_dom (JSON-LD → H1 → escaneo de texto)."""
     try:
-        page.goto(url, timeout=30_000, wait_until="domcontentloaded")
-        page.wait_for_timeout(2500)
-
-        # Precio DOM (respaldo por si la visión no lo lee bien)
-        precio_txt, precio_num = _extraer_precio_dom(page)
-        page.screenshot(path=str(ruta), full_page=False)
-        b64 = base64.b64encode(ruta.read_bytes()).decode()
-        return ruta, b64, precio_txt, precio_num
-
-    except Exception as exc:
-        logger.warning("  Screenshot error %s: %s", url, exc)
-        return None, None, None, None
-
-
-def _extraer_precio_dom(page) -> tuple[str | None, int | None]:
-    # 1. JSON-LD
-    try:
-        info = page.evaluate(_JS_JSONLD)
+        info = await page.evaluate(_JS_JSONLD)
         if info:
             currency = (info.get("currency") or "").upper()
             if currency in ("COP", ""):
@@ -545,9 +540,8 @@ def _extraer_precio_dom(page) -> tuple[str | None, int | None]:
     except Exception:
         pass
 
-    # 2. JS cerca del H1
     try:
-        t = page.evaluate(_JS_PRECIO_PRINCIPAL)
+        t = await page.evaluate(_JS_PRECIO_PRINCIPAL)
         if t:
             num = _parsear_precio_cop(t)
             if not num:
@@ -559,9 +553,8 @@ def _extraer_precio_dom(page) -> tuple[str | None, int | None]:
     except Exception:
         pass
 
-    # 3. Escaneo de texto
     try:
-        texto = page.evaluate("document.body.innerText") or ""
+        texto = await page.evaluate("document.body.innerText") or ""
         candidatos = [
             _parsear_precio_cop(m.group(0))
             for m in _RE_PRECIO_COP.finditer(texto)
@@ -569,11 +562,84 @@ def _extraer_precio_dom(page) -> tuple[str | None, int | None]:
         candidatos = [n for n in candidatos if n and _es_precio_razonable(n)]
         if candidatos:
             from collections import Counter
-            return _formatear_cop(Counter(candidatos).most_common(1)[0][0]), Counter(candidatos).most_common(1)[0][0]
+            mc = Counter(candidatos).most_common(1)[0][0]
+            return _formatear_cop(mc), mc
     except Exception:
         pass
 
     return None, None
+
+
+def _capturar_concurrente(urls: list[str], dir_out: Path) -> dict:
+    """
+    Captura varias URLs EN PARALELO (hasta _CONCURRENCIA_PW a la vez).
+    Retorna {url: (ruta_png, base64_png, precio_texto, precio_numero)}.
+    Reemplaza el bucle serial: corta el tiempo de cada ronda ~N veces.
+    """
+    if not urls:
+        return {}
+    try:
+        return asyncio.run(_capturar_async(list(urls), dir_out))
+    except Exception as exc:
+        logger.error("Captura concurrente falló: %s", exc)
+        return {u: (None, None, None, None) for u in urls}
+
+
+async def _capturar_async(urls: list[str], dir_out: Path) -> dict:
+    from playwright.async_api import async_playwright
+
+    resultados: dict = {}
+    sem = asyncio.Semaphore(_CONCURRENCIA_PW)
+
+    async def _ruta_handler(route):
+        if route.request.resource_type in ("font", "media"):
+            await route.abort()
+        else:
+            await route.continue_()
+
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        ctx = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            locale="es-CO",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        )
+        await ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        await ctx.route("**/*", _ruta_handler)
+
+        async def _una(url: str):
+            async with sem:
+                page = await ctx.new_page()
+                try:
+                    await page.goto(url, timeout=_NAV_TIMEOUT_MS, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(_NAV_WAIT_MS)
+                    p_txt, p_num = await _extraer_precio_dom_async(page)
+                    ruta = dir_out / (hashlib.md5(url.encode()).hexdigest()[:12] + ".png")
+                    await page.screenshot(path=str(ruta), full_page=False)
+                    b64 = base64.b64encode(ruta.read_bytes()).decode()
+                    resultados[url] = (ruta, b64, p_txt, p_num)
+                except Exception as exc:
+                    logger.warning("  Screenshot error %s: %s", url, exc)
+                    resultados[url] = (None, None, None, None)
+                finally:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
+
+        await asyncio.gather(*[_una(u) for u in urls])
+        await browser.close()
+
+    return resultados
 
 
 # ── PASO 2b/2c — Verificación visual de capturas (IMÁGENES, no PDF) ───────────
@@ -754,8 +820,8 @@ def _buscar_links_reemplazo(
                 url = str(lk.get("url", "")).strip()
                 if not url or url in excluir:
                     continue
-                if _url_bloqueada(url):
-                    logger.warning("  Reemplazo bloqueado (dominio excluido): %s", url)
+                if _url_bloqueada(url) or _url_lenta(url):
+                    logger.info("  Reemplazo descartado (dominio excluido/lento): %s", url)
                     continue
                 urls.append(url)
             return urls
@@ -784,176 +850,139 @@ def tomar_screenshots(
 
     Retorna (productos_actualizados, {url: ResultadoScreenshot}).
     """
-    from playwright.sync_api import sync_playwright
-
     dir_out.mkdir(parents=True, exist_ok=True)
 
     res: dict[str, ResultadoScreenshot]  = {}
     productos_actualizados: list[ProductoLinks] = []
 
     try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            ctx = browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                locale="es-CO",
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-            )
-            ctx.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-            page = ctx.new_page()
-            page.route(
-                "**/*",
-                lambda route: route.abort()
-                if route.request.resource_type in ("font", "media")
-                else route.continue_(),
-            )
+        for producto in productos:
+            desc            = producto.descripcion or producto.item
+            urls_pendientes = [_normalizar_url(lk.url) for lk in producto.links if lk.url]
+            urls_intentadas: set[str] = set(urls_pendientes)
+            links_validos: list[LinkProducto] = []
+            rondas_ok = 0
 
-            for producto in productos:
-                desc            = producto.descripcion or producto.item
-                urls_pendientes = [_normalizar_url(lk.url) for lk in producto.links if lk.url]
-                urls_intentadas: set[str] = set(urls_pendientes)
-                links_validos: list[LinkProducto] = []
-                # precio DOM por URL (guardado durante la visita para usarlo como respaldo)
-                precio_dom: dict[str, tuple[str | None, int | None]] = {}
-                rondas_ok = 0
+            for ronda in range(1, _MAX_RONDAS + 1):
+                if not urls_pendientes:
+                    break
 
-                for ronda in range(1, _MAX_RONDAS + 1):
-                    if not urls_pendientes:
-                        break
+                logger.info(
+                    "  [%s] Ronda %d/%d — visitando %d URL(s) en paralelo",
+                    producto.item, ronda, _MAX_RONDAS, len(urls_pendientes),
+                )
 
-                    logger.info(
-                        "  [%s] Ronda %d/%d — visitando %d URL(s) con Playwright",
-                        producto.item, ronda, _MAX_RONDAS, len(urls_pendientes),
-                    )
+                # ── a. Playwright CONCURRENTE: screenshot + precio DOM + base64
+                datos_ronda = _capturar_concurrente(urls_pendientes, dir_out)
 
-                    # ── a. Playwright: screenshot + precio DOM + base64 ───────
-                    # ruta/b64/precio por URL para esta ronda
-                    datos_ronda: dict[str, tuple] = {}
-                    for url in urls_pendientes:
-                        ruta, b64, p_txt, p_num = _screenshot_una_url(page, url, dir_out)
-                        datos_ronda[url] = (ruta, b64, p_txt, p_num)
-                        precio_dom[url]  = (p_txt, p_num)
-
-                    # ── b. Verificación visual por IMÁGENES (no PDF) ──────────
-                    capturas_img = [
-                        (url, b64) for url, (_, b64, _, _) in datos_ronda.items() if b64
-                    ]
-                    if api_key and capturas_img:
-                        verifs = _verificar_con_vision(desc, capturas_img, api_key)
-                        verif_por_url = {v["url"]: v for v in verifs}
-                    else:
-                        # Sin IA: aceptar todas las que tienen captura
-                        verif_por_url = {
-                            url: {"valido": True, "precio_texto": None, "precio_numero": None, "motivo": ""}
-                            for url, (ruta, _, _, _) in datos_ronda.items() if ruta
-                        }
-
-                    # ── c. Clasificar válidos / inválidos ─────────────────────
-                    for url, (ruta, _b64, p_txt_dom, p_num_dom) in datos_ronda.items():
-                        verif = verif_por_url.get(url)
-
-                        if not verif or not verif.get("valido"):
-                            res[url] = ResultadoScreenshot(None, None, None, False)
-                            motivo = (verif or {}).get("motivo", "captura no disponible")
-                            logger.warning("  [%s] ✗ inválido (%s): %s", producto.item, motivo, url)
-                            continue
-
-                        # La visión lee la MISMA imagen que va al Excel → fuente de verdad.
-                        # DOM como respaldo solo si la visión no extrajo precio.
-                        precio_num = verif.get("precio_numero") or p_num_dom
-                        precio_txt = verif.get("precio_texto")  or p_txt_dom
-                        if precio_num and not _es_precio_razonable(precio_num):
-                            precio_num = None
-                            precio_txt = None
-
-                        # Regla obligatoria: una cotización SOLO cuenta si tiene precio real.
-                        # Sin precio (captura vacía, placeholder, sin stock) NO sirve como
-                        # referencia → no cuenta para las 3 y disparará completación manual.
-                        if not precio_num:
-                            res[url] = ResultadoScreenshot(None, None, None, False)
-                            logger.warning(
-                                "  [%s] ✗ sin precio (no cuenta): %s", producto.item, url
-                            )
-                            continue
-
-                        res[url] = ResultadoScreenshot(
-                            ruta=ruta,
-                            precio_texto=precio_txt,
-                            precio_numero=precio_num,
-                            sin_stock=False,
-                        )
-                        links_validos.append(LinkProducto(
-                            url=url,
-                            precio_texto=precio_txt or "N/A",
-                            precio_numero=precio_num,
-                        ))
-                        logger.info(
-                            "  [%s] ✓ válido (%d/%d): %s → %s",
-                            producto.item, len(links_validos), _MIN_VALIDOS, url,
-                            precio_txt,
-                        )
-
-                    rondas_ok += 1
-
-                    # ── d. ¿Tenemos suficientes? ──────────────────────────────
-                    needed = _MIN_VALIDOS - len(links_validos)
-                    if needed <= 0:
-                        logger.info("  [%s] %d/%d válidos — listo.", producto.item, len(links_validos), _MIN_VALIDOS)
-                        break
-
-                    if ronda >= _MAX_RONDAS:
-                        logger.warning(
-                            "  [%s] Límite de rondas alcanzado con %d/%d válidos.",
-                            producto.item, len(links_validos), _MIN_VALIDOS,
-                        )
-                        break
-
-                    if not api_key:
-                        break
-
-                    # Pedir un BUFFER de reemplazos (no solo los que faltan): muchas URLs
-                    # fallan al capturar/validar, así que pedimos de sobra para que cada
-                    # ronda tenga opciones reales de completar el mínimo de 3.
-                    n_pedir = max(needed * 3, 6)
-                    logger.info(
-                        "  [%s] Faltan %d — buscando %d URL(s) de reemplazo...",
-                        producto.item, needed, n_pedir,
-                    )
-                    nuevas = _buscar_links_reemplazo(desc, n_pedir, urls_intentadas, api_key, departamento)
-                    nuevas = [_normalizar_url(u) for u in nuevas if u not in urls_intentadas]
-                    if not nuevas:
-                        logger.warning("  [%s] Sin reemplazos disponibles.", producto.item)
-                        break
-
-                    urls_pendientes = nuevas
-                    urls_intentadas.update(nuevas)
-
-                if len(links_validos) < _MIN_VALIDOS:
-                    logger.warning(
-                        "  [%s] ⚠ Final: solo %d/%d válidos tras %d ronda(s) — NO cumple el mínimo.",
-                        producto.item, len(links_validos), _MIN_VALIDOS, rondas_ok,
-                    )
+                # ── b. Verificación visual por IMÁGENES (no PDF) ──────────
+                capturas_img = [
+                    (url, b64) for url, (_, b64, _, _) in datos_ronda.items() if b64
+                ]
+                if api_key and capturas_img:
+                    verifs = _verificar_con_vision(desc, capturas_img, api_key)
+                    verif_por_url = {v["url"]: v for v in verifs}
                 else:
-                    logger.info(
-                        "  [%s] Final: %d/%d válidos tras %d ronda(s).",
-                        producto.item, len(links_validos), _MIN_VALIDOS, rondas_ok,
-                    )
-                productos_actualizados.append(ProductoLinks(
-                    item=producto.item,
-                    descripcion=producto.descripcion,
-                    links=links_validos[:_MIN_VALIDOS],
-                ))
+                    # Sin IA: aceptar todas las que tienen captura
+                    verif_por_url = {
+                        url: {"valido": True, "precio_texto": None, "precio_numero": None, "motivo": ""}
+                        for url, (ruta, _, _, _) in datos_ronda.items() if ruta
+                    }
 
-            browser.close()
+                # ── c. Clasificar válidos / inválidos ─────────────────────
+                for url, (ruta, _b64, p_txt_dom, p_num_dom) in datos_ronda.items():
+                    verif = verif_por_url.get(url)
+
+                    if not verif or not verif.get("valido"):
+                        res[url] = ResultadoScreenshot(None, None, None, False)
+                        motivo = (verif or {}).get("motivo", "captura no disponible")
+                        logger.warning("  [%s] ✗ inválido (%s): %s", producto.item, motivo, url)
+                        continue
+
+                    # La visión lee la MISMA imagen que va al Excel → fuente de verdad.
+                    # DOM como respaldo solo si la visión no extrajo precio.
+                    precio_num = verif.get("precio_numero") or p_num_dom
+                    precio_txt = verif.get("precio_texto")  or p_txt_dom
+                    if precio_num and not _es_precio_razonable(precio_num):
+                        precio_num = None
+                        precio_txt = None
+
+                    # Regla obligatoria: una cotización SOLO cuenta si tiene precio real.
+                    # Sin precio (captura vacía, placeholder, sin stock) NO sirve como
+                    # referencia → no cuenta para las 3 y disparará completación manual.
+                    if not precio_num:
+                        res[url] = ResultadoScreenshot(None, None, None, False)
+                        logger.warning(
+                            "  [%s] ✗ sin precio (no cuenta): %s", producto.item, url
+                        )
+                        continue
+
+                    res[url] = ResultadoScreenshot(
+                        ruta=ruta,
+                        precio_texto=precio_txt,
+                        precio_numero=precio_num,
+                        sin_stock=False,
+                    )
+                    links_validos.append(LinkProducto(
+                        url=url,
+                        precio_texto=precio_txt or "N/A",
+                        precio_numero=precio_num,
+                    ))
+                    logger.info(
+                        "  [%s] ✓ válido (%d/%d): %s → %s",
+                        producto.item, len(links_validos), _MIN_VALIDOS, url,
+                        precio_txt,
+                    )
+
+                rondas_ok += 1
+
+                # ── d. ¿Tenemos suficientes? ──────────────────────────────
+                needed = _MIN_VALIDOS - len(links_validos)
+                if needed <= 0:
+                    logger.info("  [%s] %d/%d válidos — listo.", producto.item, len(links_validos), _MIN_VALIDOS)
+                    break
+
+                if ronda >= _MAX_RONDAS:
+                    logger.warning(
+                        "  [%s] Límite de rondas alcanzado con %d/%d válidos.",
+                        producto.item, len(links_validos), _MIN_VALIDOS,
+                    )
+                    break
+
+                if not api_key:
+                    break
+
+                # Pedir un buffer pequeño de reemplazos, capado a _URLS_POR_RONDA
+                # para controlar costo/tiempo (cada URL = navegación + visión).
+                n_pedir = min(_URLS_POR_RONDA, needed + 2)
+                logger.info(
+                    "  [%s] Faltan %d — buscando %d URL(s) de reemplazo...",
+                    producto.item, needed, n_pedir,
+                )
+                nuevas = _buscar_links_reemplazo(desc, n_pedir, urls_intentadas, api_key, departamento)
+                nuevas = [_normalizar_url(u) for u in nuevas if u not in urls_intentadas]
+                if not nuevas:
+                    logger.warning("  [%s] Sin reemplazos disponibles.", producto.item)
+                    break
+
+                urls_pendientes = nuevas
+                urls_intentadas.update(nuevas)
+
+            if len(links_validos) < _MIN_VALIDOS:
+                logger.warning(
+                    "  [%s] ⚠ Final: solo %d/%d válidos tras %d ronda(s) — NO cumple el mínimo.",
+                    producto.item, len(links_validos), _MIN_VALIDOS, rondas_ok,
+                )
+            else:
+                logger.info(
+                    "  [%s] Final: %d/%d válidos tras %d ronda(s).",
+                    producto.item, len(links_validos), _MIN_VALIDOS, rondas_ok,
+                )
+            productos_actualizados.append(ProductoLinks(
+                item=producto.item,
+                descripcion=producto.descripcion,
+                links=links_validos[:_MIN_VALIDOS],
+            ))
 
     except Exception as exc:
         logger.error("Playwright error general: %s", exc)
