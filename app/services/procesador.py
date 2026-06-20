@@ -859,81 +859,152 @@ class ValidadorDocumental:
             )
 
         # ── 5. Búsqueda web de precios de referencia ──────────────────────────
-        # Solo si los cruces de cotizaciones pasaron sin alertas.
         web_excel_nombre = "N/A"
+
         if not seleccionadas_xlsx:
-            logger.info("  [%s] 04 — Búsqueda web omitida: sin cotizaciones seleccionadas", id_unico)
+            logger.info(
+                "  [%s] 04 — Búsqueda web omitida: sin cotizaciones seleccionadas",
+                id_unico,
+            )
+
         elif cotiz_carpeta_detiene:
             obs.append(
-                "04 — PROCESO DETENIDO: falta alguna cotización en 02_COTIZACIONES_Y_COMPRA "
-                "— búsqueda web omitida"
+                "04 — PROCESO DETENIDO: falta alguna cotización en "
+                "02_COTIZACIONES_Y_COMPRA — búsqueda web omitida"
             )
-            logger.warning("  [%s] 04 — Proceso detenido: cotización(es) faltante(s) en carpeta 02", id_unico)
-        elif not cot_pdf_ok:
-            obs.append(
-                "04 — Búsqueda web de precios de referencia omitida: "
-                "revisar primero las alertas de cotizaciones en el PDF"
+            logger.warning(
+                "  [%s] 04 — Proceso detenido: cotización(es) faltante(s) "
+                "en carpeta 02",
+                id_unico,
             )
-            logger.info("  [%s] 04 — Búsqueda web omitida por alertas en cotizaciones", id_unico)
+
         else:
-            logger.info("  [%s] 04 — Iniciando búsqueda web de precios de referencia...", id_unico)
-            web_ok, web_productos, web_resumen = buscar_links_openai(seleccionadas_xlsx, OPENAI_API_KEY, departamento)
-            logger.info("  [%s] 04 — GPT-4.1 web: %s", id_unico, web_resumen)
+            # Si hubo alertas en la cotización ganadora, se deja la observación,
+            # pero igualmente se generan las evidencias web.
+            if not cot_pdf_ok:
+                obs.append(
+                    "04 — Se encontraron alertas en la cotización ganadora; "
+                    "las evidencias web se generaron para revisión manual."
+                )
+                logger.warning(
+                    "  [%s] 04 — Continuando búsqueda web pese a alertas "
+                    "en la cotización ganadora.",
+                    id_unico,
+                )
+
+            logger.info(
+                "  [%s] 04 — Iniciando búsqueda web de precios de referencia...",
+                id_unico,
+            )
+
+            web_ok, web_productos, web_resumen = buscar_links_openai(
+                seleccionadas_xlsx,
+                OPENAI_API_KEY,
+                departamento,
+            )
+
+            logger.info(
+                "  [%s] 04 — GPT-4.1 web: %s",
+                id_unico,
+                web_resumen,
+            )
 
             if web_ok and web_productos:
                 dir_ss = dest_base / "_screenshots"
-                web_productos, screenshots = tomar_screenshots(web_productos, dir_ss, OPENAI_API_KEY, departamento)
+
+                web_productos, screenshots = tomar_screenshots(
+                    web_productos,
+                    dir_ss,
+                    OPENAI_API_KEY,
+                    departamento,
+                )
 
                 # Nombre del Excel = id_unico (sanitizado para nombre de archivo)
                 nombre_seguro = re.sub(r'[\\/:*?"<>|]', "_", id_unico)
-                dir_salida    = Path(self.ruta_checklist).parent
-                ruta_web_xls  = dir_salida / f"{nombre_seguro}.xlsx"
+                dir_salida = Path(self.ruta_checklist).parent
+                ruta_web_xls = dir_salida / f"{nombre_seguro}.xlsx"
+
                 try:
-                    alertas_precio = generar_excel_cotizaciones(id_unico, web_productos, screenshots, ruta_web_xls, seleccionadas_xlsx)
-                    logger.info("  [%s] 04 — Excel web generado: %s", id_unico, ruta_web_xls.name)
+                    alertas_precio = generar_excel_cotizaciones(
+                        id_unico,
+                        web_productos,
+                        screenshots,
+                        ruta_web_xls,
+                        seleccionadas_xlsx,
+                    )
+
+                    logger.info(
+                        "  [%s] 04 — Excel web generado: %s",
+                        id_unico,
+                        ruta_web_xls.name,
+                    )
+
                     for alerta_msg in alertas_precio:
                         obs.append(alerta_msg)
                         logger.warning("  [%s] %s", id_unico, alerta_msg)
 
-                    # Regla obligatoria: 3 cotizaciones (capturas/links) por producto.
-                    # Si algún producto quedó con menos, se marca COMPLETACIÓN MANUAL (amarillo).
-                    incompletos = [p for p in web_productos if len(p.links) < 3]
+                    # Regla obligatoria: 3 cotizaciones válidas por producto.
+                    # Si algún producto quedó con menos, se marca completación manual.
+                    incompletos = [
+                        p for p in web_productos
+                        if len(p.links) < 3
+                    ]
+
                     if incompletos:
-                        detalle = "; ".join(f"{p.item} ({len(p.links)}/3)" for p in incompletos)
-                        web_excel_nombre = (
-                            f"REQUIERE COMPLETACIÓN MANUAL — {ruta_web_xls.name}: "
-                            f"{len(incompletos)} producto(s): {detalle} Capturas realizadas."
+                        detalle = "; ".join(
+                            f"{p.item} ({len(p.links)}/3)"
+                            for p in incompletos
                         )
+
+                        web_excel_nombre = (
+                            f"REQUIERE COMPLETACIÓN MANUAL — "
+                            f"{ruta_web_xls.name}: "
+                            f"{len(incompletos)} producto(s): "
+                            f"{detalle} Capturas realizadas."
+                        )
+
                         obs.append(
                             f"04 — WEB: requiere completación manual, "
-                            f"{len(incompletos)} producto(s): {detalle} Capturas realizadas."
+                            f"{len(incompletos)} producto(s): "
+                            f"{detalle} Capturas realizadas."
                         )
+
                         logger.warning(
-                            "  [%s] 04 — WEB completación manual: %s", id_unico, detalle
+                            "  [%s] 04 — WEB completación manual: %s",
+                            id_unico,
+                            detalle,
                         )
                     else:
                         web_excel_nombre = ruta_web_xls.name
+
                 except Exception as exc:
-                    logger.error("  [%s] 04 — Error generando Excel web: %s", id_unico, exc)
-                    obs.append(f"04 — Error generando Excel de precios web: {exc}")
+                    logger.error(
+                        "  [%s] 04 — Error generando Excel web: %s",
+                        id_unico,
+                        exc,
+                    )
+                    obs.append(
+                        f"04 — Error generando Excel de precios web: {exc}"
+                    )
                     tiene_error = True
+
             else:
                 obs.append(f"04 — Búsqueda web: {web_resumen}")
                 tiene_error = True
 
         return {
-            "encontrada":       True,
+            "encontrada": True,
             "sub01_encontrada": True,
-            "xlsx_encontrado":  xlsx_plan is not None,
-            "xlsx_valido":      xlsx_valido,
-            "xlsx_resumen":     xlsx_resumen,
-            "pdf_plan":         pdf_plan_ok,
-            "firmas_resumen":   firmas_resumen,
-            "cot_pdf_resumen":  cot_pdf_resumen,
+            "xlsx_encontrado": xlsx_plan is not None,
+            "xlsx_valido": xlsx_valido,
+            "xlsx_resumen": xlsx_resumen,
+            "pdf_plan": pdf_plan_ok,
+            "firmas_resumen": firmas_resumen,
+            "cot_pdf_resumen": cot_pdf_resumen,
             "cotiz_carpeta_resumen": cotiz_carpeta_resumen,
-            "web_excel":        web_excel_nombre,
-            "observaciones":    obs,
-            "tiene_error":      tiene_error,
+            "web_excel": web_excel_nombre,
+            "observaciones": obs,
+            "tiene_error": tiene_error,
         }
 
     # ── Helpers ───────────────────────────────────────────────────────────────

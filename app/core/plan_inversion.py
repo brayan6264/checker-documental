@@ -591,12 +591,54 @@ def validar_cotizaciones_en_carpeta(
             resumen="FALTA — sin PDFs de cotización",
         )
 
+    # Palabras para descartar documentos administrativos
+    EXCLUIR = {
+        "rut",
+        "camara",
+        "cámara",
+        "certificado",
+        "certificacion",
+        "certificación",
+        "existencia",
+        "representacion",
+        "representación",
+        "bancaria",
+    }
+
     # Cache de texto nativo por PDF
     _texto_cache: dict[Path, str] = {}
     def _texto(p: Path) -> str:
         if p not in _texto_cache:
             _texto_cache[p] = _texto_nativo_pdf(p)
         return _texto_cache[p]
+
+    # Filtrar PDFs administrativos (RUT, Cámara, Certificados, etc.)
+    pdfs_cotizacion = []
+
+    for p in pdfs:
+        nombre = normalizar(p.name)
+
+        if any(x in nombre for x in EXCLUIR):
+            logger.info("  02_COTIZACIONES: descartado %s", p.name)
+            continue
+
+        pdfs_cotizacion.append(p)
+
+    logger.info(
+        "  02_COTIZACIONES: PDFs candidatos a cotización: %s",
+        [p.name for p in pdfs_cotizacion]
+    )
+
+    if not pdfs_cotizacion:
+        return ResultadoCotizacionesCarpeta(
+            ok=False,
+            detiene=True,
+            alertas=[
+                "⛔ No se encontraron PDFs de cotización válidos "
+                "(solo RUT, Cámara, Certificados, etc.)"
+            ],
+            resumen="FALTA — sin PDFs de cotización válidos",
+        )
 
     # Búsqueda del PDF de cada proveedor (por tokens en nombre de archivo + contenido)
     proveedores = sorted({c.proveedor for c in cotizaciones if c.proveedor})
@@ -607,20 +649,36 @@ def validar_cotizaciones_en_carpeta(
     for prov in proveedores:
         toks = _tokens_empresa(prov)
         mejor, mejor_score = None, 0
-        for p in pdfs:
+
+        for p in pdfs_cotizacion:
             heno = normalizar(p.name) + " " + normalizar(_texto(p))
             score = sum(1 for t in toks if t in heno)
+
+            logger.info(
+                "PDF=%s | score=%s",
+                p.name,
+                score
+            )
+
             if score > mejor_score:
                 mejor, mejor_score = p, score
+
         if mejor and mejor_score > 0:
             pdf_por_proveedor[prov] = mejor
-            logger.info("  02_COTIZACIONES: proveedor '%s' → %s", prov, mejor.name)
+            logger.info(
+                "  02_COTIZACIONES: proveedor '%s' → %s",
+                prov,
+                mejor.name
+            )
         else:
             alertas.append(
                 f"⛔ Cotización de '{prov}' NO encontrada en 02_COTIZACIONES_Y_COMPRA"
             )
             detiene = True
-            logger.warning("  02_COTIZACIONES: proveedor '%s' SIN PDF", prov)
+            logger.warning(
+                "  02_COTIZACIONES: proveedor '%s' SIN PDF",
+                prov
+            )
 
     # Validar el valor_total de cada cotización contra el PDF de su proveedor
     ok_items: list[str] = []
@@ -631,11 +689,16 @@ def validar_cotizaciones_en_carpeta(
         if pdf is None:
             continue   # ya alertado como faltante
         if c.valor_total is None:
-            alertas.append(f"{c.item} (Cot.{c.cotizacion} — {c.proveedor}): sin valor en Excel")
+            alertas.append(
+                f"{c.item} (Cot.{c.cotizacion} — {c.proveedor}): sin valor en Excel"
+            )
             continue
         numeros = _extraer_numeros_pdf(_texto(pdf))
         if c.valor_total in numeros:
-            ok_items.append(f"{c.item}: ${c.valor_total:,}".replace(",", "."))
+            ok_items.append(
+                f"{c.item}: ${c.valor_total:,}".replace(",", ".")
+            )
+
             logger.info(
                 "  02_COTIZACIONES: ✓ %s (Cot.%d, %s) valor %d coincide en %s",
                 c.item, c.cotizacion, c.proveedor, c.valor_total, pdf.name,
@@ -651,9 +714,9 @@ def validar_cotizaciones_en_carpeta(
             )
 
     # Resumen CORTO para la celda del checklist (el detalle va en observaciones)
-    n_cotiz     = sum(1 for c in cotizaciones if c.proveedor)
+    n_cotiz = sum(1 for c in cotizaciones if c.proveedor)
     n_faltantes = len(proveedores) - len(pdf_por_proveedor)
-    n_problema  = len(alertas) - n_faltantes   # precios que no coinciden / sin valor
+    n_problema = len(alertas) - n_faltantes
 
     if not alertas:
         resumen = f"OK — {len(ok_items)}/{n_cotiz} precios coinciden"

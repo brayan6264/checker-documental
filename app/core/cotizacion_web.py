@@ -1340,7 +1340,7 @@ def generar_excel_cotizaciones(
             ws.row_dimensions[current_row].height = 36
             if alerta.supera_limite:
                 alertas_desviacion.append(
-                    f"04-WEB [{prod.item}]: {alerta.mensaje}"
+                    f"04_VALIDACION_PRECIO_MERCADO [{prod.item}]: {alerta.mensaje}"
                 )
         else:
             nc = ws.cell(row=current_row, column=1,
