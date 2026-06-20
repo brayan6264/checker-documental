@@ -592,10 +592,15 @@ async def _capturar_async(urls: list[str], dir_out: Path) -> dict:
     sem = asyncio.Semaphore(_CONCURRENCIA_PW)
 
     async def _ruta_handler(route):
-        if route.request.resource_type in ("font", "media"):
-            await route.abort()
-        else:
-            await route.continue_()
+        # Silenciar errores cuando la página/contexto ya se cerró: las peticiones
+        # "en vuelo" al cerrar la página lanzan TargetClosedError; es inofensivo.
+        try:
+            if route.request.resource_type in ("font", "media"):
+                await route.abort()
+            else:
+                await route.continue_()
+        except Exception:
+            pass
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -637,6 +642,11 @@ async def _capturar_async(urls: list[str], dir_out: Path) -> dict:
                         pass
 
         await asyncio.gather(*[_una(u) for u in urls])
+        # Quitar el handler de rutas antes de cerrar para evitar callbacks en vuelo
+        try:
+            await ctx.unroute_all(behavior="ignoreErrors")
+        except Exception:
+            pass
         await browser.close()
 
     return resultados

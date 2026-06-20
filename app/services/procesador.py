@@ -782,6 +782,7 @@ class ValidadorDocumental:
             firmas_resumen = "N/A — sin PDF"
             logger.info("  [%s] 04 — Sin PDFs en subcarpeta 01", id_unico)
         else:
+            # 2.1 Buscar por CONTENIDO (frase "plan de inversión" en el texto/OCR)
             for pdf in pdfs:
                 texto = extraer_texto(pdf)
                 if "plan de inversion" in normalizar(texto):
@@ -789,9 +790,27 @@ class ValidadorDocumental:
                     pdf_para_cruce = pdf
                     logger.info("  [%s] 04 — 'Plan de inversión' encontrado en: %s", id_unico, pdf.name)
                     break
+
+            # 2.2 Fallback por NOMBRE de archivo: el PDF escaneado de firma/plan
+            #     a veces no arroja la frase exacta por errores de OCR, pero el
+            #     archivo existe (FIRMA_UP_*.pdf, PLAN_INVERSION_*.pdf, etc.).
+            if not pdf_plan_ok:
+                _CLAVES_NOMBRE = ("firma", "plan", "aprobacion")
+                pdf_por_nombre = next(
+                    (p for p in pdfs if any(k in normalizar(p.stem) for k in _CLAVES_NOMBRE)),
+                    None,
+                )
+                if pdf_por_nombre is not None:
+                    pdf_plan_ok    = True
+                    pdf_para_cruce = pdf_por_nombre
+                    logger.info(
+                        "  [%s] 04 — PDF de plan/firma detectado por NOMBRE: %s",
+                        id_unico, pdf_por_nombre.name,
+                    )
+
             if not pdf_plan_ok:
                 obs.append(
-                    "04 — Ningún PDF contiene 'Plan de inversión'"
+                    "04 — Ningún PDF contiene 'Plan de inversión' ni nombre de firma/plan"
                     f" (revisados: {', '.join(p.name for p in pdfs)})"
                     " — firmas y cotizaciones no verificadas"
                 )
