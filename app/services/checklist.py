@@ -313,9 +313,9 @@ class ChecklistWriter:
             celda.font = FONT_IA_WARN
 
         # Naranja de atención en "observaciones" si hay alerta del Excel de capturas
-        # (desviación de precio "04-WEB [...] ALERTA"). Color distinto de rojo/amarillo.
+        # (desviación de precio "04_VALIDACION_PRECIO_MERCADO [...] ALERTA"). Color distinto de rojo/amarillo.
         obs_val = str(valores[COLUMNAS.index("observaciones")])
-        if "04-WEB" in obs_val and "ALERTA" in obs_val.upper():
+        if "04_VALIDACION_PRECIO_MERCADO" in obs_val and "ALERTA" in obs_val.upper():
             celda      = self._ws.cell(row=fila_num, column=COLUMNAS.index("observaciones") + 1)
             celda.fill = FILL_ATENCION
             celda.font = FONT_IA_WARN
