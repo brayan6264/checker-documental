@@ -19,6 +19,7 @@ import logging
 import re
 from pathlib import Path
 from typing import NamedTuple
+from app.ia.extractor_docling import extraer_texto_docling
 
 logger = logging.getLogger(__name__)
 
@@ -293,47 +294,24 @@ def _texto_nativo_pdf(ruta_pdf: Path) -> str:
 
 def _ocr_rapido_pdf(ruta_pdf: Path) -> str:
     """
-    Un solo pase de OCR de calidad (400 DPI, binarización, LSTM PSM 6).
-    Si los valores no se encuentran con este resultado, el llamador escala
-    directamente a GPT sin reintentar con más combinaciones.
+    Extracción de texto usando Docling.
+    Reemplaza el OCR basado en Tesseract para PDFs escaneados.
     """
     try:
-        import fitz
-        import pytesseract
-        from PIL import Image, ImageEnhance
-        import io
-        import os
-    except ImportError:
-        logger.warning("  OCR: dependencias no instaladas")
-        return ""
-
-    _TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(_TESSERACT_CMD):
-        pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
-
-    try:
-        doc = fitz.open(str(ruta_pdf))
+        texto = extraer_texto_docling(ruta_pdf)
+        logger.info(
+            "  DOCLING '%s': %d chars",
+            ruta_pdf.name,
+            len(texto)
+        )
+        return texto.strip()
     except Exception as exc:
-        logger.warning("  OCR: no se pudo abrir '%s': %s", ruta_pdf.name, exc)
+        logger.warning(
+            "  DOCLING '%s': %s",
+            ruta_pdf.name,
+            exc
+        )
         return ""
-
-    partes: list[str] = []
-    for i, pagina in enumerate(doc):
-        try:
-            pix  = pagina.get_pixmap(dpi=400)
-            img  = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
-            img  = ImageEnhance.Contrast(img).enhance(2.0)
-            img  = img.point(lambda p: 0 if p < 150 else 255, "1").convert("RGB")
-            texto = pytesseract.image_to_string(img, config="--oem 3 --psm 6 -l spa+eng")
-            partes.append(texto.strip())
-        except Exception as exc:
-            logger.warning("  OCR pág %d '%s': %s", i + 1, ruta_pdf.name, exc)
-
-    doc.close()
-    resultado = "\n".join(partes).strip()
-    logger.info("  OCR '%s': %d chars", ruta_pdf.name, len(resultado))
-    return resultado
-
 
 def _verificar_valores_con_gpt(
     ruta_pdf: Path,
