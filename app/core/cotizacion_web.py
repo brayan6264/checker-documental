@@ -32,7 +32,9 @@ logger = logging.getLogger(__name__)
 #  - ANÁLISIS (visión): mini es suficiente y mucho más barato para validar capturas.
 #  - TÉRMINOS: tarea simple de texto, mini es suficiente.
 _MODELO_BUSQUEDA = "gpt-4o"
-_MODELO_ANALISIS = "gpt-4o-mini"
+# ANÁLISIS (visión): gpt-4o (no mini) — distingue mucho mejor el precio tachado/original
+# del precio con descuento, que es una discriminación visual sutil (tamaño, línea encima).
+_MODELO_ANALISIS = "gpt-4o"
 _MODELO_TERMINOS = "gpt-4o-mini"
 
 # Pool inicial de URLs por producto — cuanto mayor, más probabilidad de 3 válidos.
@@ -1288,22 +1290,28 @@ Analiza las {n} captura(s) de pantalla y para CADA UNA devuelve un objeto JSON c
      • NO hay NINGÚN precio visible en la captura (producto sin stock sin precio, ficha
        sin precio cargado).
 
-2. "precio_texto" (string o null): el precio ORIGINAL (sin descuento) en pesos colombianos.
-   REGLA CRÍTICA DE PRECIO — léela con cuidado:
-   • Cuando hay descuento verás DOS precios juntos: uno MÁS PEQUEÑO/TACHADO (a veces gris,
-     con línea encima) que es el ORIGINAL, y uno MÁS GRANDE/RESALTADO (a veces con etiqueta
-     "-23%") que es el precio CON descuento.
-     → DEBES devolver el precio ORIGINAL = el TACHADO = el MÁS ALTO de los dos.
-     Ejemplo real: si ves "$ 37.198  -23%" en grande y "$ 48.500" tachado debajo →
-     el precio correcto es 48.500 (el tachado), NO 37.198.
-   • Si solo hay UN precio (sin descuento) → usa ese precio.
-   • Formato colombiano con puntos de miles: "$ 1.234.567", "$ 89.900".
-   • Si el precio está en USD, EUR u otra moneda extranjera → null (página inválida).
-   • Si NO hay precio visible en absoluto → null.
+PRECIOS — MUY IMPORTANTE. Mira SOLO los precios del producto PRINCIPAL (cerca del título
+y del botón de compra; ignora precios de "productos relacionados"/"también compraron").
+Extrae estos DOS campos por separado, OBSERVANDO bien cuál está tachado:
 
-3. "precio_numero" (integer o null): el mismo precio original como entero sin puntos ni símbolos.
-   Ejemplos: "$ 1.234.567" → 1234567, "$ 89.900" → 89900.
-   El número REAL que ves en la página. NO copies ejemplos. Si no hay precio, null.
+2. "precio_normal_numero" (integer o null): el precio REGULAR / DE LISTA / ANTES del descuento.
+   • Cuando hay descuento, es el precio MÁS ALTO, casi siempre TACHADO (con una línea encima),
+     en letra más pequeña o gris, a veces con etiqueta "Antes", "Precio normal" o "P. de lista".
+   • Si NO hay descuento (un solo precio en pantalla), este campo = ese único precio.
+   • Entero sin puntos ni símbolos: "$ 289.900" → 289900.
+
+3. "precio_oferta_numero" (integer o null): el precio CON descuento / de oferta, si existe.
+   • Es el precio MÁS BAJO, generalmente grande y resaltado, a veces con "-23%", "Oferta" o "Ahorra $X".
+   • Si NO hay descuento → null.
+
+   ⛔ REGLA DE ORO: el precio que necesitamos es el NORMAL (sin descuento). Por eso DEBES
+   separar ambos. NUNCA pongas el precio de oferta en "precio_normal_numero".
+   Ejemplo real: ves "$ 239.900 und" grande + "Ahorra $50.000" + "$ 289.900" tachado debajo →
+   precio_normal_numero = 289900, precio_oferta_numero = 239900.
+   Otro ejemplo: ves "$ 37.198" con "-23%" y "$ 48.500" tachado →
+   precio_normal_numero = 48500, precio_oferta_numero = 37198.
+   Si el precio está en moneda extranjera (USD/EUR/MXN) → ambos null.
+   Si NO hay precio visible → ambos null.
 
 4. "moneda" (string o null): la moneda del precio si es visible ("COP", "USD", "EUR", etc.).
    Si no se distingue pero es una tienda colombiana, asumir "COP".
@@ -1322,8 +1330,8 @@ Analiza las {n} captura(s) de pantalla y para CADA UNA devuelve un objeto JSON c
 Responde ÚNICAMENTE con un array JSON de {n} objeto(s) en el MISMO ORDEN que las imágenes,
 sin texto adicional. Ejemplo para 2 imágenes:
 [
-  {{"valido": true, "precio_texto": "$ 1.234.567", "precio_numero": 1234567, "moneda": "COP", "en_stock": true, "motivo": null}},
-  {{"valido": false, "precio_texto": null, "precio_numero": null, "moneda": null, "en_stock": false, "motivo": "producto agotado"}}
+  {{"valido": true, "precio_normal_numero": 289900, "precio_oferta_numero": 239900, "moneda": "COP", "en_stock": true, "motivo": null}},
+  {{"valido": false, "precio_normal_numero": null, "precio_oferta_numero": null, "moneda": null, "en_stock": false, "motivo": "producto agotado"}}
 ]"""
 
     content: list[dict] = [{"type": "text", "text": prompt_texto}]
@@ -1354,25 +1362,39 @@ sin texto adicional. Ejemplo para 2 imágenes:
             resultado = []
             for i in range(n):
                 d = datos[i] if i < len(datos) else {}
-                precio_num = d.get("precio_numero")
-                precio_txt = d.get("precio_texto")
-                moneda     = (d.get("moneda") or "").upper()
 
-                # Rechazar precios en moneda extranjera
+                def _num(v):
+                    if v is None:
+                        return None
+                    try:
+                        return int(float(v))
+                    except (ValueError, TypeError):
+                        return None
+
+                precio_normal = _num(d.get("precio_normal_numero"))
+                precio_oferta = _num(d.get("precio_oferta_numero"))
+
+                # El precio que se publica es SIEMPRE el NORMAL (sin descuento).
+                # Solo si no hay normal se cae al de oferta (caso degenerado).
+                precio_num = precio_normal if precio_normal else precio_oferta
+                if precio_normal and precio_oferta and precio_oferta > precio_normal:
+                    # La visión los invirtió: el normal nunca es menor que la oferta.
+                    precio_num = precio_oferta
+                    logger.warning(
+                        "Vision: normal(%s) < oferta(%s) — corregido al mayor.",
+                        precio_normal, precio_oferta,
+                    )
+
+                moneda = (d.get("moneda") or "").upper()
                 if moneda and moneda not in ("COP", ""):
                     logger.warning("Vision: precio en %s descartado (no COP)", moneda)
                     precio_num = None
-                    precio_txt = None
-                elif precio_txt and any(s in precio_txt.upper() for s in ("USD", "US$", "EUR", "€", "MXN")):
-                    logger.warning("Vision: precio con moneda extranjera descartado: %s", precio_txt)
-                    precio_num = None
-                    precio_txt = None
 
-                if isinstance(precio_num, float):
-                    precio_num = int(precio_num)
                 if precio_num and not _es_precio_razonable(precio_num):
                     logger.warning("Vision: precio fuera de rango (%s) descartado", precio_num)
                     precio_num = None
+
+                precio_txt = _formatear_cop(precio_num) if precio_num else None
 
                 # en_stock: por defecto True si la visión no lo determina
                 en_stock_raw = d.get("en_stock")
