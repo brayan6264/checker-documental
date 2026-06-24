@@ -34,6 +34,9 @@ _FILA_COT_SELEC      = 32   # fila con la "X" de cotización seleccionada
 _COL_INICIO          = 4    # columna D
 _SALTO               = 3    # cada ítem ocupa 3 columnas (una por cotización)
 _HOJA_NOMBRE         = "2. Revisión compra (cotización)"
+_HOJA_FICHA_TECNICA  = "1. Ficha técnica"
+_COL_FICHA_LABEL     = 4   # columna D — etiquetas de fila
+_COL_FICHA_DATA      = 5   # columna E — primer producto (los demás siguen en E+)
 
 _RE_ITEM_GENERICO    = re.compile(r"^item\s*\d+$")   # se aplica sobre texto ya normalizado
 # Número colombiano: 195.000  /  1.796.826  /  2.990.000
@@ -712,3 +715,173 @@ def validar_cotizaciones_en_carpeta(
         alertas=alertas,
         resumen=resumen,
     )
+
+
+# ── Lectura de Ficha Técnica ──────────────────────────────────────────────────
+
+class FichaTecnica(NamedTuple):
+    """Datos técnicos de un producto extraídos de la hoja '1. Ficha técnica'."""
+    denominacion:       str | None   # "Denominación del bien" — nombre limpio del producto
+    descripcion_general: str | None  # descripción funcional del producto
+    especificaciones:   str | None   # especificaciones técnicas consolidadas
+
+
+def leer_ficha_tecnica(ruta: Path) -> dict[str, FichaTecnica]:
+    """
+    Lee la hoja '1. Ficha técnica' del PLAN_INVERSION.xlsx y extrae
+    para cada producto: denominación, descripción general y especificaciones.
+
+    Estructura de la hoja:
+      - Col D (4): etiquetas de fila
+      - Cols E+ (5+): un producto por columna
+      - Fila donde col D = "Descripciones": nombres de productos (igual que hoja 2)
+      - Filas posteriores: "Denominación del bien/insumo/...", "Descripción general",
+        "Especificaciones técnicas:", sub-especificaciones (" - Potencia", etc.)
+
+    Retorna {nombre_producto: FichaTecnica}.
+    Retorna {} si la hoja no existe o no se puede leer.
+    """
+    try:
+        import openpyxl
+        from app.core.normalizacion import normalizar as _norm
+    except ImportError:
+        return {}
+
+    try:
+        wb = openpyxl.load_workbook(str(ruta), data_only=True)
+    except Exception as exc:
+        logger.warning("  FichaTecnica: no se pudo abrir '%s': %s", ruta.name, exc)
+        return {}
+
+    if _HOJA_FICHA_TECNICA not in wb.sheetnames:
+        logger.info("  FichaTecnica: hoja '%s' no encontrada en %s", _HOJA_FICHA_TECNICA, ruta.name)
+        return {}
+
+    ws = wb[_HOJA_FICHA_TECNICA]
+
+    # Palabras que indican nombre genérico de ítem vacío → se omiten
+    _RE_ITEM_VACIO = re.compile(r'^[íi]tem\s*\d+$', re.IGNORECASE)
+
+    # Etiquetas normalizadas de "Denominación" (distintas según el tipo de capital)
+    _ETIQ_DENOMINACION = {
+        "denominacion del bien",
+        "denominacion del insumo material o inventario",
+        "denominacion de la certificacion permiso o licencia",
+        "denominacion de la certificacion o licencia requerida",
+        "denominacion",
+    }
+    # "Descripción general" aparece igual en todas las secciones
+    _ETIQ_DESC_GENERAL = {"descripcion general"}
+    # "Especificaciones técnicas:" y sus variantes
+    _ETIQ_SPECS_MAIN   = {"especificaciones tecnicas", "especificaciones tecnicas:"}
+    # Sub-especificaciones técnicas a incluir en el bloque de specs
+    _ETIQ_SPECS_SUB    = {
+        "potencia (especifique si hay alguna restriccion)",
+        "capacidad (especifique si hay alguna restriccion)",
+        "dimensiones (especifique si hay alguna restriccion)",
+        "peso (especifique si hay alguna restriccion)",
+        "adicione otras especificaciones tecnicas a tener en cuenta",
+        "adicione las especificaciones a tener en cuenta",
+        "material",
+        "composicion",
+        "referencia (especifique si hay alguna restriccion)",
+    }
+
+    # ── Paso 1: encontrar la fila de encabezado con los nombres de productos ──
+    header_row_idx: int | None = None
+    product_cols: dict[int, str] = {}  # {col_1based: nombre_producto}
+
+    for row in ws.iter_rows(min_row=1, max_row=20):
+        label_val = row[_COL_FICHA_LABEL - 1].value if len(row) >= _COL_FICHA_LABEL else None
+        if label_val and "descripciones" in _norm(str(label_val)):
+            header_row_idx = row[0].row
+            for cell in row[_COL_FICHA_DATA - 1:]:
+                val = cell.value
+                if val is None:
+                    continue
+                nombre = str(val).strip()
+                if not nombre or _RE_ITEM_VACIO.match(nombre) or nombre == ".":
+                    continue
+                product_cols[cell.column] = nombre
+            break
+
+    if not product_cols:
+        logger.warning(
+            "  FichaTecnica: no se encontró fila 'Descripciones' en '%s'", ruta.name
+        )
+        return {}
+
+    logger.info(
+        "  FichaTecnica: %d producto(s) en fila %s de '%s': %s",
+        len(product_cols), header_row_idx, ruta.name,
+        list(product_cols.values()),
+    )
+
+    # ── Paso 2: recolectar datos por etiqueta para cada columna de producto ──
+    # Usamos dicts para acumular: tomamos el PRIMER valor no nulo por (col, campo)
+    data: dict[int, dict[str, list[str]]] = {
+        col: {"denominacion": [], "descripcion_general": [], "especificaciones": []}
+        for col in product_cols
+    }
+
+    for row in ws.iter_rows(min_row=(header_row_idx or 1) + 1):
+        label_cell = row[_COL_FICHA_LABEL - 1] if len(row) >= _COL_FICHA_LABEL else None
+        if label_cell is None or label_cell.value is None:
+            continue
+
+        label_raw  = str(label_cell.value).strip()
+        label_norm = _norm(label_raw.lstrip("- \t"))
+
+        # Clasificar la etiqueta
+        if label_norm in _ETIQ_DENOMINACION:
+            campo = "denominacion"
+        elif label_norm in _ETIQ_DESC_GENERAL:
+            campo = "descripcion_general"
+        elif label_norm in _ETIQ_SPECS_MAIN:
+            campo = "especificaciones"
+        elif label_norm in _ETIQ_SPECS_SUB:
+            campo = "especificaciones"   # sub-specs se concatenan al bloque de specs
+        else:
+            continue
+
+        for col, _ in product_cols.items():
+            col_0 = col - 1
+            if col_0 >= len(row):
+                continue
+            cell_val = row[col_0].value
+            if cell_val is None:
+                continue
+            texto = str(cell_val).strip()
+            if not texto:
+                continue
+
+            # Para denominación y descripción: solo guardar el primer valor
+            if campo in ("denominacion", "descripcion_general"):
+                if not data[col][campo]:
+                    data[col][campo].append(texto)
+            else:
+                # Para specs: acumular pero con máximo razonable
+                if len(data[col]["especificaciones"]) < 10:
+                    data[col]["especificaciones"].append(texto)
+
+    # ── Paso 3: ensamblar FichaTecnica por nombre de producto ──────────────
+    resultado: dict[str, FichaTecnica] = {}
+    for col, nombre in product_cols.items():
+        d = data[col]
+        denominacion       = d["denominacion"][0] if d["denominacion"] else None
+        descripcion_general = d["descripcion_general"][0] if d["descripcion_general"] else None
+        especificaciones   = " | ".join(d["especificaciones"]) if d["especificaciones"] else None
+
+        ficha = FichaTecnica(
+            denominacion        = denominacion,
+            descripcion_general = descripcion_general,
+            especificaciones    = especificaciones,
+        )
+        resultado[nombre] = ficha
+        logger.debug(
+            "  FichaTecnica '%s': denom=%s | desc=%s chars | specs=%s chars",
+            nombre[:40],
+            bool(denominacion), len(descripcion_general or ""), len(especificaciones or ""),
+        )
+
+    return resultado

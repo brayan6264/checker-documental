@@ -721,6 +721,7 @@ class ValidadorDocumental:
             verificar_firmas_pdf,
             validar_cotizacion_seleccionada_en_pdf,
             validar_cotizaciones_en_carpeta,
+            leer_ficha_tecnica,
         )
         from app.core.cotizacion_web import (
             buscar_links_openai,
@@ -742,6 +743,7 @@ class ValidadorDocumental:
         xlsx_resumen     = "FALTA"
         seleccionadas_xlsx = []
         todas_cotizaciones_xlsx = []
+        fichas_tecnicas = {}  # dict {nombre_producto: FichaTecnica}
 
         if xlsx_plan is None:
             obs.append("04 — Falta PLAN_INVERSION.xlsx — no se validarán cotizaciones")
@@ -750,11 +752,13 @@ class ValidadorDocumental:
             logger.info("  [%s] 04 — PLAN_INVERSION.xlsx NO encontrado", id_unico)
         else:
             logger.info("  [%s] 04 — PLAN_INVERSION.xlsx encontrado: %s", id_unico, xlsx_plan.name)
-            resultado_xlsx     = validar_plan_inversion(xlsx_plan)
+            resultado_xlsx          = validar_plan_inversion(xlsx_plan)
             xlsx_valido             = resultado_xlsx.ok
             xlsx_resumen            = resultado_xlsx.resumen
             seleccionadas_xlsx      = resultado_xlsx.seleccionadas
             todas_cotizaciones_xlsx = resultado_xlsx.todas_cotizaciones
+            # Leer ficha técnica para enriquecer la búsqueda de precios web
+            fichas_tecnicas = leer_ficha_tecnica(xlsx_plan)
             if not resultado_xlsx.ok:
                 for alerta in resultado_xlsx.alertas:
                     obs.append(
@@ -917,6 +921,7 @@ class ValidadorDocumental:
                 seleccionadas_xlsx,
                 OPENAI_API_KEY,
                 departamento,
+                fichas_tecnicas,
             )
 
             logger.info(
