@@ -15,6 +15,7 @@ Dependencias:
 import base64
 import logging
 from pathlib import Path
+from app.ia.extractor_docling import extraer_texto_docling
 
 logger = logging.getLogger(__name__)
 
@@ -120,43 +121,22 @@ def _extraer_pdf(ruta: Path) -> str:
     # Último recurso: devolver lo poco que haya
     return texto_ocr or "\n".join(paginas_texto).strip()
 
-
 def _ocr_pdf(doc, ruta: Path) -> str:
     """
-    OCR rápido y de calidad: 400 DPI, binarización + LSTM (OEM 3, PSM 6).
-    Un solo pase por página — si el resultado es insuficiente el llamador
-    escala a GPT directamente en lugar de reintentar con más combinaciones.
+    Extracción usando Docling para PDFs escaneados.
+    Reemplaza el OCR basado en Tesseract.
     """
     try:
-        import pytesseract
-        from PIL import Image, ImageEnhance
-        import io
-        import os
-    except ImportError:
-        logger.warning("pytesseract/Pillow no instalados (pip install pytesseract pillow). Sin OCR.")
+        texto = extraer_texto_docling(ruta)
+        logger.info( "  DOCLING '%s': %d chars totales",
+            ruta.name,
+            len(texto)
+        )
+        return texto.strip()
+
+    except Exception as exc:
+        logger.warning( "  DOCLING error '%s': %s", ruta.name,exc)
         return ""
-
-    if os.path.exists(_TESSERACT_CMD):
-        pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
-
-    partes: list[str] = []
-    for i, pagina in enumerate(doc):
-        try:
-            pix  = pagina.get_pixmap(dpi=400)
-            img  = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
-            # Binarización suave: realza contraste antes de umbralizar
-            img  = ImageEnhance.Contrast(img).enhance(2.0)
-            img  = img.point(lambda p: 0 if p < 150 else 255, "1").convert("RGB")
-            texto = pytesseract.image_to_string(img, config="--oem 3 --psm 6 -l spa+eng")
-            partes.append(texto.strip())
-            logger.debug("  OCR pág %d/%d '%s': %d chars", i + 1, len(doc), ruta.name, len(texto))
-        except Exception as exc:
-            logger.warning("  OCR error pág %d '%s': %s", i + 1, ruta.name, exc)
-
-    resultado = "\n".join(partes).strip()
-    logger.info("  OCR '%s': %d chars totales", ruta.name, len(resultado))
-    return resultado
-
 
 def _extraer_con_gpt(ruta: Path) -> str:
     """

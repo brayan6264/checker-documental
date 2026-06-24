@@ -911,8 +911,8 @@ def tomar_screenshots(
 
                     # La visión lee la MISMA imagen que va al Excel → fuente de verdad.
                     # DOM como respaldo solo si la visión no extrajo precio.
-                    precio_num = verif.get("precio_numero") or p_num_dom
-                    precio_txt = verif.get("precio_texto")  or p_txt_dom
+                    precio_num = p_num_dom or verif.get("precio_numero")
+                    precio_txt = p_txt_dom or verif.get("precio_texto")
                     if precio_num and not _es_precio_razonable(precio_num):
                         precio_num = None
                         precio_txt = None
