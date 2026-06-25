@@ -544,7 +544,7 @@ _RE_PRECIO_COP = re.compile(
     r'(?:COP\s*|cop\s*|\$\s*)?(\d{1,3}(?:[.,]\d{3})+)(?:\s*(?:COP|cop))?'
 )
 
-_PRECIO_MIN_COP = 5_000
+_PRECIO_MIN_COP = 100
 _PRECIO_MAX_COP = 50_000_000
 
 
