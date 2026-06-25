@@ -122,12 +122,14 @@ def _extraer_pdf(ruta: Path) -> str:
 
 def _ocr_pdf(ruta: Path) -> str:
     """
-    Extrae texto de un PDF escaneado utilizando dos motores OCR:
+    Extrae texto de un PDF escaneado.
 
-        1. EasyOCR (OCR principal)
-        2. Docling (parser estructural)
+    Flujo:
 
-    Finalmente selecciona automáticamente el mejor resultado.
+        1. EasyOCR (motor OCR principal).
+        2. Si el resultado es suficiente, se devuelve directamente.
+        3. Si el resultado es pobre, se ejecuta Docling.
+        4. Se selecciona automáticamente el mejor resultado.
     """
 
     try:
@@ -143,8 +145,25 @@ def _ocr_pdf(ruta: Path) -> str:
         )
 
         # -----------------------------------------------------------------
-        # Docling
+        # Si EasyOCR produjo suficiente texto, evitar ejecutar Docling
         # -----------------------------------------------------------------
+        if len(texto_easyocr.strip()) >= _CHARS_OCR_MINIMO:
+
+            logger.info(
+                "  EasyOCR suficiente (%d caracteres). Se omite Docling.",
+                len(texto_easyocr),
+            )
+
+            return texto_easyocr.strip()
+
+        # -----------------------------------------------------------------
+        # EasyOCR fue insuficiente -> ejecutar Docling
+        # -----------------------------------------------------------------
+        logger.info(
+            "  EasyOCR insuficiente (%d caracteres). Ejecutando Docling...",
+            len(texto_easyocr),
+        )
+
         texto_docling = extraer_texto_docling(ruta)
 
         logger.info(
@@ -153,9 +172,6 @@ def _ocr_pdf(ruta: Path) -> str:
             len(texto_docling),
         )
 
-        # -----------------------------------------------------------------
-        # Selección automática del mejor resultado
-        # -----------------------------------------------------------------
         texto, motor = seleccionar_mejor_texto(
             texto_easyocr=texto_easyocr,
             texto_docling=texto_docling,

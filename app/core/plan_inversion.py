@@ -19,7 +19,7 @@ import logging
 import re
 from pathlib import Path
 from typing import NamedTuple
-from app.ia.extractor_docling import extraer_texto_docling
+from app.ia.extractor import extraer_texto
 
 logger = logging.getLogger(__name__)
 
@@ -295,26 +295,7 @@ def _texto_nativo_pdf(ruta_pdf: Path) -> str:
         return ""
 
 
-def _ocr_rapido_pdf(ruta_pdf: Path) -> str:
-    """
-    Extracción de texto usando Docling.
-    Reemplaza el OCR basado en Tesseract para PDFs escaneados.
-    """
-    try:
-        texto = extraer_texto_docling(ruta_pdf)
-        logger.info(
-            "  DOCLING '%s': %d chars",
-            ruta_pdf.name,
-            len(texto)
-        )
-        return texto.strip()
-    except Exception as exc:
-        logger.warning(
-            "  DOCLING '%s': %s",
-            ruta_pdf.name,
-            exc
-        )
-        return ""
+from app.ia.extractor import extraer_texto
 
 def _verificar_valores_con_gpt(
     ruta_pdf: Path,
@@ -432,40 +413,53 @@ def validar_cotizacion_seleccionada_en_pdf(
     ruta_pdf: Path,
 ) -> ResultadoCotizacionPDF:
     """
-    Verifica que el valor total de cada cotización seleccionada aparezca en el PDF.
+    Verifica que el valor total de cada cotización seleccionada aparezca
+    en el PDF.
 
-    Pipeline de 3 capas para PDFs escaneados:
-      Capa 1 — texto nativo (PyMuPDF): rápido, funciona en PDFs digitales.
-      Capa 2 — OCR agresivo (Tesseract + preprocesado): para PDFs escaneados.
-      Capa 3 — GPT-4o-mini con PDF inline: segunda opinión cuando OCR falla.
-      Si ninguna capa confirma un valor → alerta definitiva (valores inválidos).
+    Flujo:
+
+      1. Detecta si el PDF es escaneado (solo para decidir el fallback GPT).
+      2. Extrae el texto mediante el pipeline OCR centralizado.
+      3. Busca los valores en el texto extraído.
+      4. Si el PDF es escaneado y algún valor no aparece, consulta GPT-4o-mini.
     """
-    # ── Capa 1: texto nativo ──────────────────────────────────────────────────
+
+    # ------------------------------------------------------------------
+    # Detectar si el PDF es escaneado (solo para el fallback GPT)
+    # ------------------------------------------------------------------
     texto_nativo = _texto_nativo_pdf(ruta_pdf)
     es_escaneado = len(texto_nativo.strip()) < _CHARS_ESCANEADO_UMBRAL
 
-    texto_activo = texto_nativo
-    origen       = "texto nativo"
+    # ------------------------------------------------------------------
+    # Extraer texto usando el pipeline centralizado
+    # ------------------------------------------------------------------
+    texto_activo = extraer_texto(ruta_pdf)
 
-    if es_escaneado:
-        logger.info(
-            "  PDF '%s' parece escaneado (%d chars nativos). Activando OCR agresivo...",
-            ruta_pdf.name, len(texto_nativo.strip()),
-        )
-        # ── Capa 2: OCR rápido (un pase) ─────────────────────────────────────
-        texto_ocr = _ocr_rapido_pdf(ruta_pdf)
-        if texto_ocr:
-            texto_activo = texto_ocr
-            origen       = "OCR"
+    origen = "OCR" if es_escaneado else "texto nativo"
+
+    logger.info(
+        "  Texto utilizado (%s): %d caracteres",
+        origen,
+        len(texto_activo),
+    )
 
     numeros_pdf = _extraer_numeros_pdf(texto_activo)
-    logger.debug("  Números extraídos (%s): %s", origen, sorted(numeros_pdf))
+
+    logger.debug(
+        "  Números extraídos (%s): %s",
+        origen,
+        sorted(numeros_pdf),
+    )
 
     alertas_pdf: list[str] = []
-    ok_items:    list[str] = []
+    ok_items: list[str] = []
     pendientes_gpt: list[CotizacionSeleccionada] = []
 
+    # ------------------------------------------------------------------
+    # Validación de valores
+    # ------------------------------------------------------------------
     for sel in seleccionadas:
+
         if sel.valor_total is None:
             alertas_pdf.append(
                 f"{sel.item} (Cot.{sel.cotizacion}): valor total no disponible en Excel"
@@ -473,54 +467,87 @@ def validar_cotizacion_seleccionada_en_pdf(
             continue
 
         if sel.valor_total in numeros_pdf:
-            ok_items.append(f"{sel.item}: ${sel.valor_total:,}".replace(",", "."))
+
+            ok_items.append(
+                f"{sel.item}: ${sel.valor_total:,}".replace(",", ".")
+            )
+
             logger.info(
                 "  PDF [%s]: ✓ valor %d de '%s' (Cot.%d) encontrado",
-                origen, sel.valor_total, sel.item, sel.cotizacion,
+                origen,
+                sel.valor_total,
+                sel.item,
+                sel.cotizacion,
             )
+
         else:
+
             logger.warning(
                 "  PDF [%s]: ✗ valor %d de '%s' (Cot.%d) NO encontrado",
-                origen, sel.valor_total, sel.item, sel.cotizacion,
+                origen,
+                sel.valor_total,
+                sel.item,
+                sel.cotizacion,
             )
+
             pendientes_gpt.append(sel)
 
-    # ── Capa 3: GPT-4o-mini para los que no se encontraron ───────────────────
+    # ------------------------------------------------------------------
+    # Segunda opinión con GPT solo para PDFs escaneados
+    # ------------------------------------------------------------------
     if pendientes_gpt and es_escaneado:
+
         logger.info(
             "  PDF escaneado: %d valor(es) sin confirmar — enviando a GPT-4o-mini...",
             len(pendientes_gpt),
         )
-        confirmados_gpt, no_confirmados_gpt = _verificar_valores_con_gpt(ruta_pdf, pendientes_gpt)
+
+        confirmados_gpt, no_confirmados_gpt = _verificar_valores_con_gpt(
+            ruta_pdf,
+            pendientes_gpt,
+        )
 
         for sel in confirmados_gpt:
-            ok_items.append(f"{sel.item}: ${sel.valor_total:,}".replace(",", "."))
+            ok_items.append(
+                f"{sel.item}: ${sel.valor_total:,}".replace(",", ".")
+            )
 
         for sel in no_confirmados_gpt:
             alertas_pdf.append(
-                f"⛔ {sel.item} (Cot.{sel.cotizacion} — {sel.proveedor or 'sin proveedor'}): "
-                f"valor ${sel.valor_total:,} NO confirmado por OCR ni por IA — "
-                f"los valores del PDF escaneado podrían ser incorrectos o ilegibles".replace(",", ".")
-            )
-    elif pendientes_gpt:
-        # PDF digital (no escaneado) pero el valor simplemente no está
-        for sel in pendientes_gpt:
-            alertas_pdf.append(
-                f"{sel.item} (Cot.{sel.cotizacion} — {sel.proveedor or 'sin proveedor'}): "
-                f"valor ${sel.valor_total:,} no encontrado en PDF".replace(",", ".")
+                (
+                    f"⛔ {sel.item} "
+                    f"(Cot.{sel.cotizacion} — {sel.proveedor or 'sin proveedor'}): "
+                    f"valor ${sel.valor_total:,} NO confirmado por OCR ni por IA — "
+                    f"los valores del PDF escaneado podrían ser incorrectos o ilegibles"
+                ).replace(",", ".")
             )
 
+    elif pendientes_gpt:
+
+        # PDF digital: el valor simplemente no aparece
+        for sel in pendientes_gpt:
+
+            alertas_pdf.append(
+                (
+                    f"{sel.item} "
+                    f"(Cot.{sel.cotizacion} — {sel.proveedor or 'sin proveedor'}): "
+                    f"valor ${sel.valor_total:,} no encontrado en PDF"
+                ).replace(",", ".")
+            )
+
+    # ------------------------------------------------------------------
+    # Resumen
+    # ------------------------------------------------------------------
     if not alertas_pdf:
         resumen = f"OK — {len(ok_items)} producto(s) verificados en PDF"
     else:
         resumen = "FALTA — " + " | ".join(alertas_pdf)
 
     return ResultadoCotizacionPDF(
-        ok      = len(alertas_pdf) == 0,
-        alertas = alertas_pdf,
-        resumen = resumen,
+        ok=len(alertas_pdf) == 0,
+        alertas=alertas_pdf,
+        resumen=resumen,
     )
-
 
 # ── Verificación de cotizaciones en carpeta 02_COTIZACIONES_Y_COMPRA ──────────
 
