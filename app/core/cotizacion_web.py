@@ -556,6 +556,37 @@ def _normalizar_url(url: str) -> str:
     return url
 
 
+# Parámetros de URL que son de TRACKING (no cambian la página). La misma ficha
+# aparece con/sin estos (srsltid de Google Shopping, utm_*, gclid…) y se contaba
+# como dos URLs distintas → capturas duplicadas. Se ignoran al deduplicar.
+_PARAMS_TRACKING = {
+    "srsltid", "gclid", "fbclid", "msclkid", "mc_eid", "_ga", "ref", "ref_",
+    "igshid", "spm", "scm", "yclid", "dclid",
+}
+
+
+def _canonizar_url(url: str) -> str:
+    """
+    Clave canónica para DEDUPLICAR (no para navegar). Colapsa a la misma clave:
+      - la misma página con/sin parámetros de tracking (srsltid, utm_*, gclid…)
+      - barra final sobrante, host con/sin www, esquema http/https, fragmento #.
+    Así dos enlaces a la MISMA ficha no producen dos capturas iguales.
+    """
+    try:
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+        p = urlsplit(url)
+        host = p.netloc.lower().removeprefix("www.")
+        path = p.path.rstrip("/") or "/"
+        qs = [
+            (k, v) for k, v in parse_qsl(p.query, keep_blank_values=False)
+            if k.lower() not in _PARAMS_TRACKING and not k.lower().startswith("utm_")
+        ]
+        qs.sort()
+        return urlunsplit(("", host, path, urlencode(qs), ""))
+    except Exception:
+        return (url or "").lower()
+
+
 def _es_precio_razonable(num: int) -> bool:
     return _PRECIO_MIN_COP <= num <= _PRECIO_MAX_COP
 
@@ -782,13 +813,14 @@ def buscar_links_openai(
       1. OpenAI web_search_preview — query principal
       2. OpenAI web_search_preview — query alternativa (ángulo diferente)
       3. SerpAPI (Google Shopping + orgánico) — si SERPAPI_KEY está en entorno
-      4. Google Custom Search — si GOOGLE_API_KEY + GOOGLE_CSE_ID están en entorno
+      4. Brave Search — si BRAVE_API_KEY está en entorno
+      5. Google Custom Search — si GOOGLE_API_KEY + GOOGLE_CSE_ID están en entorno
 
     Si se provee `fichas` (dict {item: FichaTecnica}), los prompts de búsqueda incluyen
     la descripción general y especificaciones técnicas para búsquedas más precisas.
 
-    Las URLs de todas las fuentes se fusionan, deduplicando por dominio.
-    Retorna (ok, productos, resumen).
+    Las URLs se deduplican por clave canónica (ignora params de tracking) y se limita
+    a 2 por dominio. Retorna (ok, productos, resumen).
     """
     try:
         from openai import OpenAI
@@ -896,10 +928,10 @@ Responde ÚNICAMENTE con JSON:
         dominios_conteo: dict[str, int] = {}
         dominios_vistos: set[str] = set()   # para la deduplicación de OpenAI (1 por dominio)
         links_merged: list[LinkProducto] = []
-        urls_vistas: set[str] = set()
+        claves_vistas: set[str] = set()     # claves canónicas (dedup robusta de URLs)
 
         def _puede_agregar(url: str) -> bool:
-            if not url or url in urls_vistas:
+            if not url or _canonizar_url(url) in claves_vistas:
                 return False
             if _url_bloqueada(url) or _url_lenta(url) or _url_es_categoria(url) or _url_no_navegable(url):
                 return False
@@ -909,7 +941,7 @@ Responde ÚNICAMENTE con JSON:
         def _registrar(url: str, lk: LinkProducto):
             dom = urlparse(url).netloc.lower().removeprefix("www.")
             dominios_conteo[dom] = dominios_conteo.get(dom, 0) + 1
-            urls_vistas.add(url)
+            claves_vistas.add(_canonizar_url(url))
             links_merged.append(lk)
 
         # Llamada A
@@ -1193,8 +1225,14 @@ async def _capturar_async(urls: list[str], dir_out: Path) -> dict:
 
         async def _una(url: str):
             async with sem:
-                page = await ctx.new_page()
+                page = None
                 try:
+                    # new_page() TAMBIÉN puede colgarse si el navegador quedó en mal
+                    # estado tras un "Page crashed" → lo acotamos con timeout.
+                    page = await asyncio.wait_for(ctx.new_page(), timeout=15)
+                    # Si el renderer se cae a mitad de operación, el evento 'crash'
+                    # rompe el await en curso para no esperar el timeout completo.
+                    page.on("crash", lambda _p: logger.warning("  Página crasheó: %s", url))
                     ruta, b64, p_txt, p_num = await asyncio.wait_for(
                         _navegar_y_capturar(page, url),
                         timeout=_TIMEOUT_ABSOLUTO,
@@ -1207,17 +1245,40 @@ async def _capturar_async(urls: list[str], dir_out: Path) -> dict:
                     logger.warning("  Screenshot error %s: %s", url, exc)
                     resultados[url] = (None, None, None, None)
                 finally:
-                    try:
-                        await asyncio.wait_for(page.close(), timeout=5)
-                    except Exception:
-                        pass
+                    if page is not None:
+                        try:
+                            await asyncio.wait_for(page.close(), timeout=5)
+                        except Exception:
+                            pass
 
-        await asyncio.gather(*[_una(u) for u in urls])
+        # Backstop global de la ronda: aunque cada URL ya está acotada, esto
+        # garantiza que la ronda completa nunca quede colgada indefinidamente.
+        _timeout_ronda = 60 + _TIMEOUT_ABSOLUTO * (len(urls) // _CONCURRENCIA_PW + 2)
         try:
-            await ctx.unroute_all(behavior="ignoreErrors")
+            await asyncio.wait_for(
+                asyncio.gather(*[_una(u) for u in urls]),
+                timeout=_timeout_ronda,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "  Ronda de capturas excedió %ds — se continúa con lo obtenido.",
+                int(_timeout_ronda),
+            )
+        # Limpieza acotada: un navegador con un renderer crasheado puede dejar
+        # COLGADO el cierre indefinidamente. Lo acotamos; si no responde, el
+        # context manager `async with async_playwright()` mata el proceso al salir.
+        try:
+            await asyncio.wait_for(ctx.unroute_all(behavior="ignoreErrors"), timeout=10)
         except Exception:
             pass
-        await browser.close()
+        try:
+            await asyncio.wait_for(ctx.close(), timeout=10)
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(browser.close(), timeout=15)
+        except Exception:
+            logger.warning("  browser.close() no respondió a tiempo — el navegador se forzará al salir.")
 
     return resultados
 
@@ -1458,9 +1519,10 @@ def _buscar_links_reemplazo(
 
     urls_finales: list[str] = []
     dominios_ok: set[str]   = set(excluir_dominios)
+    excluir_canon: set[str] = {_canonizar_url(u) for u in excluir}
 
     def _agregar(url: str) -> bool:
-        if not url or url in excluir:
+        if not url or _canonizar_url(url) in excluir_canon:
             return False
         if _url_bloqueada(url) or _url_lenta(url) or _url_es_categoria(url) or _url_no_navegable(url):
             return False
@@ -1468,6 +1530,7 @@ def _buscar_links_reemplazo(
         if dom in dominios_ok:
             return False
         dominios_ok.add(dom)
+        excluir_canon.add(_canonizar_url(url))
         urls_finales.append(url)
         return True
 
@@ -1552,8 +1615,20 @@ def tomar_screenshots(
     try:
         for producto in productos:
             desc            = producto.descripcion or producto.item
-            urls_pendientes = [_normalizar_url(lk.url) for lk in producto.links if lk.url]
-            urls_intentadas: set[str] = set(urls_pendientes)
+            # Dedup canónica del pool inicial (misma ficha con/sin srsltid, utm…).
+            urls_pendientes = []
+            _claves_pend: set[str] = set()
+            for lk in producto.links:
+                if not lk.url:
+                    continue
+                u = _normalizar_url(lk.url)
+                c = _canonizar_url(u)
+                if c not in _claves_pend:
+                    _claves_pend.add(c)
+                    urls_pendientes.append(u)
+            # Conjunto de claves ya intentadas (canónicas) y de capturas ya aceptadas.
+            claves_intentadas: set[str] = set(_claves_pend)
+            claves_validas:    set[str] = set()
             # Validez en dos niveles:
             #  - validos_stock: producto disponible (preferidos).
             #  - validos_agotado: válido pero agotado → solo como RESERVA si no hay 3 en stock.
@@ -1632,6 +1707,14 @@ def tomar_screenshots(
                         logger.warning("  [%s] ✗ sin precio visible en la captura: %s", producto.item, url)
                         continue
 
+                    # Evitar capturas DUPLICADAS: la misma ficha (clave canónica) ya
+                    # aceptada no se vuelve a incluir, aunque la URL difiera por tracking.
+                    clave = _canonizar_url(url)
+                    if clave in claves_validas:
+                        res[url] = ResultadoScreenshot(None, None, None, False)
+                        logger.info("  [%s] ↺ duplicada (misma ficha ya capturada): %s", producto.item, url)
+                        continue
+
                     # Verificación cruzada con el precio estructurado de Shopping:
                     # si difieren mucho, es señal de que la visión pudo leer mal dígitos.
                     prior_num = prior_por_url.get(url)
@@ -1655,6 +1738,7 @@ def tomar_screenshots(
                         precio_numero=precio_num,
                         sin_stock=not en_stock,
                     )
+                    claves_validas.add(clave)
                     if en_stock:
                         validos_stock.append(lk)
                         logger.info(
@@ -1693,14 +1777,19 @@ def tomar_screenshots(
                     "  [%s] Faltan %d en stock — buscando %d URL(s) de reemplazo...",
                     producto.item, needed, n_pedir,
                 )
-                nuevas = _buscar_links_reemplazo(desc, n_pedir, urls_intentadas, api_key, departamento)
-                nuevas = [_normalizar_url(u) for u in nuevas if u not in urls_intentadas]
+                nuevas_raw = _buscar_links_reemplazo(desc, n_pedir, claves_intentadas, api_key, departamento)
+                nuevas = []
+                for u in nuevas_raw:
+                    un = _normalizar_url(u)
+                    c = _canonizar_url(un)
+                    if c not in claves_intentadas:
+                        claves_intentadas.add(c)
+                        nuevas.append(un)
                 if not nuevas:
                     logger.warning("  [%s] Sin reemplazos disponibles.", producto.item)
                     break
 
                 urls_pendientes = nuevas
-                urls_intentadas.update(nuevas)
 
             # ── Selección final: en stock primero, agotados solo para completar 3 ──
             final_links = list(validos_stock[:_MIN_VALIDOS])
