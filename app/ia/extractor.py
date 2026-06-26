@@ -7,14 +7,17 @@ en una forma que pueda ser enviada a un LLM para validación semántica.
 Formatos soportados: PDF (texto nativo + OCR para escaneados), imágenes.
 
 Dependencias:
-  pip install pymupdf pillow pytesseract
-  # Tesseract binario: C:\Program Files\Tesseract-OCR\tesseract.exe
-  # Idioma español:    C:\Program Files\Tesseract-OCR\tessdata\spa.traineddata
+    pip install pymupdf
+    pip install easyocr
+    pip install opencv-python
 """
 
 import base64
 import logging
 from pathlib import Path
+from app.ia.extractor_docling import extraer_texto_docling
+from app.ia.extractor_easyocr import extraer_texto_easyocr
+from app.ia.selector import seleccionar_mejor_texto
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +28,7 @@ _EXTENSIONES_IMAGEN = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
 _CHARS_POR_PAGINA_UMBRAL = 50
 
 # Si el OCR devuelve menos de este promedio de chars/página se considera fallido
-_CHARS_OCR_MINIMO = 80
-
-# Ruta del ejecutable Tesseract en Windows
-_TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+_CHARS_OCR_MINIMO = 150
 
 
 def extraer_texto(ruta: Path) -> str:
@@ -42,7 +42,7 @@ def extraer_texto(ruta: Path) -> str:
     if ext in _EXTENSIONES_PDF:
         return _extraer_pdf(ruta)
     if ext in _EXTENSIONES_IMAGEN:
-        return _extraer_imagen_ocr(ruta)
+        return extraer_texto_easyocr(ruta)
 
     logger.debug("Formato no soportado para extracción: %s", ext)
     return ""
@@ -100,7 +100,7 @@ def _extraer_pdf(ruta: Path) -> str:
         "PDF '%s' escaneado (%.0f chars/pág). Aplicando OCR...",
         ruta.name, promedio,
     )
-    texto_ocr = _ocr_pdf(doc, ruta)
+    texto_ocr = _ocr_pdf(ruta)
     doc.close()
 
     # Evaluar si el OCR fue suficiente
@@ -120,47 +120,83 @@ def _extraer_pdf(ruta: Path) -> str:
     # Último recurso: devolver lo poco que haya
     return texto_ocr or "\n".join(paginas_texto).strip()
 
+def _ocr_pdf(ruta: Path) -> str:
+    """
+    Extrae texto de un PDF escaneado.
 
-def _ocr_pdf(doc, ruta: Path) -> str:
+    Flujo:
+
+        1. EasyOCR (motor OCR principal).
+        2. Si el resultado es suficiente, se devuelve directamente.
+        3. Si el resultado es pobre, se ejecuta Docling.
+        4. Se selecciona automáticamente el mejor resultado.
     """
-    OCR rápido y de calidad: 400 DPI, binarización + LSTM (OEM 3, PSM 6).
-    Un solo pase por página — si el resultado es insuficiente el llamador
-    escala a GPT directamente en lugar de reintentar con más combinaciones.
-    """
+
     try:
-        import pytesseract
-        from PIL import Image, ImageEnhance
-        import io
-        import os
-    except ImportError:
-        logger.warning("pytesseract/Pillow no instalados (pip install pytesseract pillow). Sin OCR.")
+        # -----------------------------------------------------------------
+        # EasyOCR
+        # -----------------------------------------------------------------
+        texto_easyocr = extraer_texto_easyocr(ruta)
+
+        logger.info(
+            "  EasyOCR '%s': %d caracteres",
+            ruta.name,
+            len(texto_easyocr),
+        )
+
+        # -----------------------------------------------------------------
+        # Si EasyOCR produjo suficiente texto, evitar ejecutar Docling
+        # -----------------------------------------------------------------
+        if len(texto_easyocr.strip()) >= _CHARS_OCR_MINIMO:
+
+            logger.info(
+                "  EasyOCR suficiente (%d caracteres). Se omite Docling.",
+                len(texto_easyocr),
+            )
+
+            return texto_easyocr.strip()
+
+        # -----------------------------------------------------------------
+        # EasyOCR fue insuficiente -> ejecutar Docling
+        # -----------------------------------------------------------------
+        logger.info(
+            "  EasyOCR insuficiente (%d caracteres). Ejecutando Docling...",
+            len(texto_easyocr),
+        )
+
+        texto_docling = extraer_texto_docling(ruta)
+
+        logger.info(
+            "  Docling '%s': %d caracteres",
+            ruta.name,
+            len(texto_docling),
+        )
+
+        texto, motor = seleccionar_mejor_texto(
+            texto_easyocr=texto_easyocr,
+            texto_docling=texto_docling,
+        )
+
+        logger.info(
+            "  OCR seleccionado '%s': %s (%d caracteres)",
+            ruta.name,
+            motor,
+            len(texto),
+        )
+
+        return texto.strip()
+
+    except Exception as exc:
+        logger.exception(
+            "Error durante el proceso OCR '%s': %s",
+            ruta.name,
+            exc,
+        )
         return ""
-
-    if os.path.exists(_TESSERACT_CMD):
-        pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
-
-    partes: list[str] = []
-    for i, pagina in enumerate(doc):
-        try:
-            pix  = pagina.get_pixmap(dpi=400)
-            img  = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
-            # Binarización suave: realza contraste antes de umbralizar
-            img  = ImageEnhance.Contrast(img).enhance(2.0)
-            img  = img.point(lambda p: 0 if p < 150 else 255, "1").convert("RGB")
-            texto = pytesseract.image_to_string(img, config="--oem 3 --psm 6 -l spa+eng")
-            partes.append(texto.strip())
-            logger.debug("  OCR pág %d/%d '%s': %d chars", i + 1, len(doc), ruta.name, len(texto))
-        except Exception as exc:
-            logger.warning("  OCR error pág %d '%s': %s", i + 1, ruta.name, exc)
-
-    resultado = "\n".join(partes).strip()
-    logger.info("  OCR '%s': %d chars totales", ruta.name, len(resultado))
-    return resultado
-
 
 def _extraer_con_gpt(ruta: Path) -> str:
     """
-    Fallback cuando el OCR de Tesseract es insuficiente en un PDF escaneado.
+    Fallback cuando EasyOCR y Docling no logran extraer suficiente texto en un PDF escaneado.
     Envía el PDF completo a gpt-4o-mini vía OpenAI Responses API (PDF inline en base64)
     y pide que transcriba todo el texto visible.
     Solo se activa para PDFs escaneados con OCR fallido; no se llama para PDFs con texto nativo.
@@ -214,27 +250,4 @@ def _extraer_con_gpt(ruta: Path) -> str:
 
     except Exception as exc:
         logger.error("  GPT-4o-mini OCR fallback error '%s': %s", ruta.name, exc)
-        return ""
-
-
-def _extraer_imagen_ocr(ruta: Path) -> str:
-    """
-    Aplica OCR a una imagen directamente con Tesseract.
-    """
-    try:
-        import pytesseract
-        from PIL import Image
-        import os
-
-        if os.path.exists(_TESSERACT_CMD):
-            pytesseract.pytesseract.tesseract_cmd = _TESSERACT_CMD
-
-        img   = Image.open(str(ruta))
-        texto = pytesseract.image_to_string(img, lang="spa+eng", config="--psm 1")
-        return texto.strip()
-    except ImportError:
-        logger.warning("pytesseract/Pillow no instalados. Sin OCR para imágenes.")
-        return ""
-    except Exception as exc:
-        logger.warning("OCR imagen '%s': %s", ruta.name, exc)
         return ""

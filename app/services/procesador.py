@@ -721,6 +721,7 @@ class ValidadorDocumental:
             verificar_firmas_pdf,
             validar_cotizacion_seleccionada_en_pdf,
             validar_cotizaciones_en_carpeta,
+            leer_ficha_tecnica,
         )
         from app.core.cotizacion_web import (
             buscar_links_openai,
@@ -742,6 +743,7 @@ class ValidadorDocumental:
         xlsx_resumen     = "FALTA"
         seleccionadas_xlsx = []
         todas_cotizaciones_xlsx = []
+        fichas_tecnicas = {}  # dict {nombre_producto: FichaTecnica}
 
         if xlsx_plan is None:
             obs.append("04 — Falta PLAN_INVERSION.xlsx — no se validarán cotizaciones")
@@ -750,11 +752,13 @@ class ValidadorDocumental:
             logger.info("  [%s] 04 — PLAN_INVERSION.xlsx NO encontrado", id_unico)
         else:
             logger.info("  [%s] 04 — PLAN_INVERSION.xlsx encontrado: %s", id_unico, xlsx_plan.name)
-            resultado_xlsx     = validar_plan_inversion(xlsx_plan)
+            resultado_xlsx          = validar_plan_inversion(xlsx_plan)
             xlsx_valido             = resultado_xlsx.ok
             xlsx_resumen            = resultado_xlsx.resumen
             seleccionadas_xlsx      = resultado_xlsx.seleccionadas
             todas_cotizaciones_xlsx = resultado_xlsx.todas_cotizaciones
+            # Leer ficha técnica para enriquecer la búsqueda de precios web
+            fichas_tecnicas = leer_ficha_tecnica(xlsx_plan)
             if not resultado_xlsx.ok:
                 for alerta in resultado_xlsx.alertas:
                     obs.append(
@@ -782,6 +786,7 @@ class ValidadorDocumental:
             firmas_resumen = "N/A — sin PDF"
             logger.info("  [%s] 04 — Sin PDFs en subcarpeta 01", id_unico)
         else:
+            # 2.1 Buscar por CONTENIDO (frase "plan de inversión" en el texto/OCR)
             for pdf in pdfs:
                 texto = extraer_texto(pdf)
                 if "plan de inversion" in normalizar(texto):
@@ -789,9 +794,27 @@ class ValidadorDocumental:
                     pdf_para_cruce = pdf
                     logger.info("  [%s] 04 — 'Plan de inversión' encontrado en: %s", id_unico, pdf.name)
                     break
+
+            # 2.2 Fallback por NOMBRE de archivo: el PDF escaneado de firma/plan
+            #     a veces no arroja la frase exacta por errores de OCR, pero el
+            #     archivo existe (FIRMA_UP_*.pdf, PLAN_INVERSION_*.pdf, etc.).
+            if not pdf_plan_ok:
+                _CLAVES_NOMBRE = ("firma", "plan", "aprobacion")
+                pdf_por_nombre = next(
+                    (p for p in pdfs if any(k in normalizar(p.stem) for k in _CLAVES_NOMBRE)),
+                    None,
+                )
+                if pdf_por_nombre is not None:
+                    pdf_plan_ok    = True
+                    pdf_para_cruce = pdf_por_nombre
+                    logger.info(
+                        "  [%s] 04 — PDF de plan/firma detectado por NOMBRE: %s",
+                        id_unico, pdf_por_nombre.name,
+                    )
+
             if not pdf_plan_ok:
                 obs.append(
-                    "04 — Ningún PDF contiene 'Plan de inversión'"
+                    "04 — Ningún PDF contiene 'Plan de inversión' ni nombre de firma/plan"
                     f" (revisados: {', '.join(p.name for p in pdfs)})"
                     " — firmas y cotizaciones no verificadas"
                 )
@@ -800,9 +823,11 @@ class ValidadorDocumental:
                 logger.info("  [%s] 04 — 'Plan de inversión' NO encontrado en PDFs", id_unico)
 
         # ── 3. Verificar firmas en el PDF ────────────────────────────────────
+        firmas_ok = False
         if pdf_para_cruce is not None:
             res_firmas     = verificar_firmas_pdf(pdf_para_cruce)
             firmas_resumen = res_firmas.resumen
+            firmas_ok      = res_firmas.ok
             if not res_firmas.ok:
                 obs.append(f"04 — Firmas: {res_firmas.resumen}")
                 tiene_error = True
@@ -859,39 +884,34 @@ class ValidadorDocumental:
             )
 
         # ── 5. Búsqueda web de precios de referencia ──────────────────────────
+        # PRERREQUISITO: las validaciones previas del flujo 04 deben estar OK.
+        # Si CUALQUIERA tiene alerta, NO se hace análisis de mercado (no tiene
+        # sentido comparar precios si los documentos/cotizaciones no son válidos).
+        # Se detiene en la PRIMERA validación que falle, en orden.
         web_excel_nombre = "N/A"
 
+        # Nota: 04_PDF_APROBACION_FIRMADO (firmas) genera alerta pero NO bloquea
+        # el análisis de mercado — una firma faltante no invalida los precios.
+        _bloqueo_web = None   # razón por la que se omite el análisis de mercado
         if not seleccionadas_xlsx:
-            logger.info(
-                "  [%s] 04 — Búsqueda web omitida: sin cotizaciones seleccionadas",
-                id_unico,
-            )
+            _bloqueo_web = "sin cotizaciones seleccionadas en el XLSX"
+        elif not pdf_plan_ok:
+            _bloqueo_web = "04_PDF_APROBACION_ENCONTRADO con alerta (PDF del plan no hallado)"
+        elif not cot_pdf_ok:
+            _bloqueo_web = "04_CONSISTENCIA_COTIZACION_GANADORA con alerta"
+        elif cotiz_carpeta_detiene or not cotiz_carpeta_ok:
+            _bloqueo_web = "04_COTIZACIONES (carpeta 02) con alerta"
 
-        elif cotiz_carpeta_detiene:
+        if _bloqueo_web is not None:
             obs.append(
-                "04 — PROCESO DETENIDO: falta alguna cotización en "
-                "02_COTIZACIONES_Y_COMPRA — búsqueda web omitida"
+                f"04 — Análisis de mercado OMITIDO: {_bloqueo_web}. "
+                "Corregir las validaciones del flujo 04 antes de generar precios de referencia."
             )
             logger.warning(
-                "  [%s] 04 — Proceso detenido: cotización(es) faltante(s) "
-                "en carpeta 02",
-                id_unico,
+                "  [%s] 04 — Búsqueda web omitida: %s", id_unico, _bloqueo_web,
             )
 
         else:
-            # Si hubo alertas en la cotización ganadora, se deja la observación,
-            # pero igualmente se generan las evidencias web.
-            if not cot_pdf_ok:
-                obs.append(
-                    "04 — Se encontraron alertas en la cotización ganadora; "
-                    "las evidencias web se generaron para revisión manual."
-                )
-                logger.warning(
-                    "  [%s] 04 — Continuando búsqueda web pese a alertas "
-                    "en la cotización ganadora.",
-                    id_unico,
-                )
-
             logger.info(
                 "  [%s] 04 — Iniciando búsqueda web de precios de referencia...",
                 id_unico,
@@ -901,6 +921,7 @@ class ValidadorDocumental:
                 seleccionadas_xlsx,
                 OPENAI_API_KEY,
                 departamento,
+                fichas_tecnicas,
             )
 
             logger.info(

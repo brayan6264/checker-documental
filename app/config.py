@@ -35,6 +35,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
 IA_HABILITADO  = os.getenv("IA_HABILITADO", "false").lower() == "true"
 
+# ── Búsqueda web adicional (estudio de mercado carpeta 04) ────────────────────
+# SerpAPI: búsqueda Google Shopping + orgánico para Colombia.
+#   Obtener clave en https://serpapi.com/  (plan gratuito disponible)
+SERPAPI_KEY = os.getenv("SERPAPI_KEY", "")
+
+# Google Custom Search: búsqueda alternativa.
+#   Requiere clave en https://console.cloud.google.com/ y motor en
+#   https://programmablesearch.google.com/
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID",  "")
+
 # Páginas máximas a enviar a la IA por documento (primeras N/2 + últimas N/2).
 IA_MAX_PAGINAS_COMPROMISO  = int(os.getenv("IA_MAX_PAGINAS_COMPROMISO",  "10"))
 IA_MAX_PAGINAS_VISITA      = int(os.getenv("IA_MAX_PAGINAS_VISITA",      "15"))

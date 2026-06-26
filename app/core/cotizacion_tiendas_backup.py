@@ -308,7 +308,7 @@ _PALABRAS_SIN_STOCK = [
 ]
 
 # Límites razonables para precios COP de productos cotizados
-_PRECIO_MIN_COP = 5_000
+_PRECIO_MIN_COP = 100
 _PRECIO_MAX_COP = 50_000_000
 
 
