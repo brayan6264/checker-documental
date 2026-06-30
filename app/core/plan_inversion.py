@@ -155,6 +155,29 @@ def validar_plan_inversion(ruta: Path) -> ResultadoPlanInversion:
     col = _COL_INICIO
     while col + 2 <= max_col:
         nombre_item = _valor(ws, _FILA_ITEM_NOMBRE, col)
+        # Normalizar el nombre del producto
+        if nombre_item is not None:
+            nombre_item = str(nombre_item).strip()
+
+        # Ignorar celdas vacías
+        if not nombre_item:
+            col += _SALTO
+            continue
+
+        # Ignorar valores numéricos equivalentes a cero
+        # (0, 0.0, 000, etc.), ya que no representan productos.
+        try:
+            if float(nombre_item) == 0:
+                logger.debug(
+                    "PLAN_INVERSION: columna %d ignorada (nombre de producto = %s)",
+                    col,
+                    nombre_item,
+                )
+                col += _SALTO
+                continue
+        except ValueError:
+            # No es un número; puede ser un nombre de producto válido.
+            pass
         proveedores = [_valor(ws, _FILA_PROVEEDOR, col + i) for i in range(3)]
         activo      = any(p for p in proveedores)
 
@@ -162,7 +185,7 @@ def validar_plan_inversion(ruta: Path) -> ResultadoPlanInversion:
             if _es_item_generico(nombre_item):
                 break   # fin de ítems reales
 
-        label = nombre_item or f"Ítem en col {col}"
+        label = nombre_item
         items_revisados += 1
         alertas_item: list[AlertaCotizacion] = []
 
