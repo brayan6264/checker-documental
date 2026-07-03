@@ -79,6 +79,7 @@ class ResultadoCotizacionPDF(NamedTuple):
     ok:       bool
     alertas:  list[str]   # una por producto cuyo valor total no se encontró en el PDF
     resumen:  str
+    items_encontrados: set = frozenset()   # ítems cuyo valor SÍ se encontró en el PDF
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -476,6 +477,7 @@ def validar_cotizacion_seleccionada_en_pdf(
 
     alertas_pdf: list[str] = []
     ok_items: list[str] = []
+    items_encontrados: set[str] = set()
     pendientes_gpt: list[CotizacionSeleccionada] = []
 
     # ------------------------------------------------------------------
@@ -494,6 +496,7 @@ def validar_cotizacion_seleccionada_en_pdf(
             ok_items.append(
                 f"{sel.item}: ${sel.valor_total:,}".replace(",", ".")
             )
+            items_encontrados.add(sel.item)
 
             logger.info(
                 "  PDF [%s]: ✓ valor %d de '%s' (Cot.%d) encontrado",
@@ -534,6 +537,7 @@ def validar_cotizacion_seleccionada_en_pdf(
             ok_items.append(
                 f"{sel.item}: ${sel.valor_total:,}".replace(",", ".")
             )
+            items_encontrados.add(sel.item)
 
         for sel in no_confirmados_gpt:
             alertas_pdf.append(
@@ -570,6 +574,7 @@ def validar_cotizacion_seleccionada_en_pdf(
         ok=len(alertas_pdf) == 0,
         alertas=alertas_pdf,
         resumen=resumen,
+        items_encontrados=items_encontrados,
     )
 
 # ── Verificación de cotizaciones en carpeta 02_COTIZACIONES_Y_COMPRA ──────────
@@ -579,6 +584,7 @@ class ResultadoCotizacionesCarpeta(NamedTuple):
     detiene:  bool          # True si falta alguna cotización → se debe detener el proceso
     alertas:  list[str]
     resumen:  str
+    proveedores_hallados: set = frozenset()   # proveedores cuyo PDF de cotización SÍ se encontró
 
 
 # Palabras genéricas de razón social que NO sirven para identificar la empresa
@@ -764,6 +770,7 @@ def validar_cotizaciones_en_carpeta(
         detiene=detiene,
         alertas=alertas,
         resumen=resumen,
+        proveedores_hallados=set(pdf_por_proveedor.keys()),
     )
 
 

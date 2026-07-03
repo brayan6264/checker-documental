@@ -66,6 +66,16 @@ def _url_lenta(url: str) -> bool:
     return any(dominio == b or dominio.endswith("." + b) for b in _DOMINIOS_LENTOS)
 
 
+def _url_dominio_permitido(url: str) -> bool:
+    """
+    Solo se aceptan dominios .com o .co (Colombia). Se rechazan TLDs de otros
+    países (.cl, .mx, .pe, .ar, etc.) y cualquier otra terminación (.net, .org…).
+    Nota: '.com.co' termina en '.co' → permitido. '.com' → permitido.
+    """
+    dominio = urlparse(url).netloc.lower().split(":")[0]
+    return dominio.endswith(".com") or dominio.endswith(".co")
+
+
 # ── Fuentes adicionales de búsqueda ──────────────────────────────────────────
 
 def _buscar_urls_serpapi(
@@ -933,6 +943,8 @@ Responde ÚNICAMENTE con JSON:
         def _puede_agregar(url: str) -> bool:
             if not url or _canonizar_url(url) in claves_vistas:
                 return False
+            if not _url_dominio_permitido(url):
+                return False
             if _url_bloqueada(url) or _url_lenta(url) or _url_es_categoria(url) or _url_no_navegable(url):
                 return False
             dom = urlparse(url).netloc.lower().removeprefix("www.")
@@ -1524,6 +1536,8 @@ def _buscar_links_reemplazo(
     def _agregar(url: str) -> bool:
         if not url or _canonizar_url(url) in excluir_canon:
             return False
+        if not _url_dominio_permitido(url):
+            return False
         if _url_bloqueada(url) or _url_lenta(url) or _url_es_categoria(url) or _url_no_navegable(url):
             return False
         dom = urlparse(url).netloc.lower().removeprefix("www.")
@@ -1957,6 +1971,7 @@ def generar_excel_cotizaciones(
     screenshots: dict[str, ResultadoScreenshot],
     ruta_salida: Path,
     seleccionadas: list | None = None,
+    links_alternativos: dict[str, list[str]] | None = None,
 ) -> list[str]:
     """
     Genera el Excel de referencia de precios web (una hoja por producto + índice).
@@ -2213,6 +2228,31 @@ def generar_excel_cotizaciones(
                          value="Sin datos suficientes para el análisis de desviación.")
             nc.font = _font(size=10, color="999999")
             ws.row_dimensions[current_row].height = 18
+
+        # ── Otros enlaces encontrados (revisión manual — sin captura) ─────
+        # Todos los links obtenidos para este producto que NO tienen captura
+        # en el Excel, como alternativas para que el revisor los visite a mano.
+        alternativos = (links_alternativos or {}).get(prod.item, [])
+        if alternativos:
+            current_row += 2
+            ws.merge_cells(f"A{current_row}:E{current_row}")
+            h = ws.cell(row=current_row, column=1,
+                        value="OTROS ENLACES ENCONTRADOS (revisión manual — sin captura)")
+            h.font      = _font(bold=True, size=11, color=_C_WHITE)
+            h.fill      = _fill(_C_MED)
+            h.alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[current_row].height = 20
+            current_row += 1
+            for j, u in enumerate(alternativos, 1):
+                lbl = ws.cell(row=current_row, column=1, value=f"Alt. {j}")
+                lbl.font      = _font(bold=True, size=9)
+                lbl.alignment = Alignment(horizontal="center", vertical="center")
+                ws.merge_cells(f"B{current_row}:E{current_row}")
+                c = ws.cell(row=current_row, column=2, value=u)
+                c.hyperlink = u
+                c.font      = Font(name="Arial", size=9, color="0563C1", underline="single")
+                ws.row_dimensions[current_row].height = 16
+                current_row += 1
 
     ruta_salida.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(ruta_salida))

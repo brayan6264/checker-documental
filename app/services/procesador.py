@@ -837,6 +837,9 @@ class ValidadorDocumental:
 
         # ── 4. Cruce cotizaciones seleccionadas vs PDF ────────────────────────
         cot_pdf_ok = False
+        # None = no se corrió el cruce → no se filtra por este criterio.
+        # Si se corre, contiene los ítems cuyo valor SÍ se encontró en el PDF.
+        items_encontrados_pdf = None
         if not seleccionadas_xlsx:
             cot_pdf_resumen = "N/A — sin cotizaciones seleccionadas en XLSX"
         elif pdf_para_cruce is None:
@@ -845,8 +848,9 @@ class ValidadorDocumental:
             resultado_cot_pdf = validar_cotizacion_seleccionada_en_pdf(
                 seleccionadas_xlsx, pdf_para_cruce
             )
-            cot_pdf_ok      = resultado_cot_pdf.ok
-            cot_pdf_resumen = resultado_cot_pdf.resumen
+            cot_pdf_ok            = resultado_cot_pdf.ok
+            cot_pdf_resumen       = resultado_cot_pdf.resumen
+            items_encontrados_pdf = resultado_cot_pdf.items_encontrados
             if not resultado_cot_pdf.ok:
                 for alerta in resultado_cot_pdf.alertas:
                     obs.append(f"04 — Cotización seleccionada: {alerta}")
@@ -860,6 +864,9 @@ class ValidadorDocumental:
         cotiz_carpeta_ok       = True
         cotiz_carpeta_detiene  = False
         cotiz_carpeta_resumen  = "N/A — sin cotizaciones en XLSX"
+        # None = no se filtra (no se corrió la verificación); si se corre, contiene
+        # los proveedores cuyo PDF de cotización SÍ se encontró en la carpeta 02.
+        proveedores_hallados_carpeta = None
         if todas_cotizaciones_xlsx:
           try:
             res_cotiz_carpeta = validar_cotizaciones_en_carpeta(
@@ -868,6 +875,7 @@ class ValidadorDocumental:
             cotiz_carpeta_ok      = res_cotiz_carpeta.ok
             cotiz_carpeta_detiene = res_cotiz_carpeta.detiene
             cotiz_carpeta_resumen = res_cotiz_carpeta.resumen
+            proveedores_hallados_carpeta = res_cotiz_carpeta.proveedores_hallados
             if not res_cotiz_carpeta.ok:
                 for alerta in res_cotiz_carpeta.alertas:
                     obs.append(f"04 — Cotización en carpeta 02: {alerta}")
@@ -890,17 +898,44 @@ class ValidadorDocumental:
         # Se detiene en la PRIMERA validación que falle, en orden.
         web_excel_nombre = "N/A"
 
-        # Nota: 04_PDF_APROBACION_FIRMADO (firmas) genera alerta pero NO bloquea
-        # el análisis de mercado — una firma faltante no invalida los precios.
+        # Nota: 04_PDF_APROBACION_FIRMADO (firmas) genera alerta pero NO bloquea.
+        # Ni la CONSISTENCIA_GANADORA ni la CARPETA 02 bloquean TODO: se analizan
+        # los productos que SÍ pasaron ambas verificaciones y se deja la alerta
+        # para los que faltan. Solo se bloquea todo si falta el PDF del plan.
         _bloqueo_web = None   # razón por la que se omite el análisis de mercado
         if not seleccionadas_xlsx:
             _bloqueo_web = "sin cotizaciones seleccionadas en el XLSX"
         elif not pdf_plan_ok:
             _bloqueo_web = "04_PDF_APROBACION_ENCONTRADO con alerta (PDF del plan no hallado)"
-        elif not cot_pdf_ok:
-            _bloqueo_web = "04_CONSISTENCIA_COTIZACION_GANADORA con alerta"
-        elif cotiz_carpeta_detiene or not cotiz_carpeta_ok:
-            _bloqueo_web = "04_COTIZACIONES (carpeta 02) con alerta"
+
+        # Un producto entra al análisis de mercado solo si:
+        #   - su valor se encontró en el PDF del plan (CONSISTENCIA_GANADORA), y
+        #   - su proveedor tiene cotización en la carpeta 02.
+        # Si una verificación no se corrió (None) → no filtra por ese criterio.
+        def _pasa_producto(s) -> bool:
+            if items_encontrados_pdf is not None and s.item not in items_encontrados_pdf:
+                return False
+            if proveedores_hallados_carpeta is not None and not (
+                s.proveedor and s.proveedor in proveedores_hallados_carpeta
+            ):
+                return False
+            return True
+
+        seleccionadas_para_web = [s for s in seleccionadas_xlsx if _pasa_producto(s)]
+        excluidos = [s.item for s in seleccionadas_xlsx if not _pasa_producto(s)]
+        if excluidos:
+            obs.append(
+                "04 — Análisis de mercado NO realizado para "
+                f"{len(excluidos)} producto(s) con alerta en cotización "
+                f"(ganadora o carpeta 02): {', '.join(excluidos)}"
+            )
+            logger.warning(
+                "  [%s] 04 — Sin análisis de mercado (cotización con alerta): %s",
+                id_unico, "; ".join(excluidos),
+            )
+
+        if _bloqueo_web is None and not seleccionadas_para_web:
+            _bloqueo_web = "ningún producto tiene cotización válida (ganadora + carpeta 02)"
 
         if _bloqueo_web is not None:
             obs.append(
@@ -913,12 +948,12 @@ class ValidadorDocumental:
 
         else:
             logger.info(
-                "  [%s] 04 — Iniciando búsqueda web de precios de referencia...",
-                id_unico,
+                "  [%s] 04 — Iniciando búsqueda web para %d producto(s) con cotización hallada...",
+                id_unico, len(seleccionadas_para_web),
             )
 
             web_ok, web_productos, web_resumen = buscar_links_openai(
-                seleccionadas_xlsx,
+                seleccionadas_para_web,
                 OPENAI_API_KEY,
                 departamento,
                 fichas_tecnicas,
@@ -933,12 +968,26 @@ class ValidadorDocumental:
             if web_ok and web_productos:
                 dir_ss = dest_base / "_screenshots"
 
+                # Pool COMPLETO de links por producto ANTES de capturar, para
+                # ofrecer al final de cada hoja los que no se capturaron.
+                pool_por_item: dict[str, list[str]] = {
+                    p.item: [lk.url for lk in p.links] for p in web_productos
+                }
+
                 web_productos, screenshots = tomar_screenshots(
                     web_productos,
                     dir_ss,
                     OPENAI_API_KEY,
                     departamento,
                 )
+
+                # Links "no capturados" = pool completo − los que quedaron en la hoja
+                links_alternativos: dict[str, list[str]] = {}
+                for p in web_productos:
+                    usados = {lk.url for lk in p.links}
+                    links_alternativos[p.item] = [
+                        u for u in pool_por_item.get(p.item, []) if u not in usados
+                    ]
 
                 # Nombre del Excel = id_unico (sanitizado para nombre de archivo)
                 nombre_seguro = re.sub(r'[\\/:*?"<>|]', "_", id_unico)
@@ -952,6 +1001,7 @@ class ValidadorDocumental:
                         screenshots,
                         ruta_web_xls,
                         seleccionadas_xlsx,
+                        links_alternativos,
                     )
 
                     logger.info(
