@@ -8,7 +8,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()  # carga .env si existe, sin pisar variables ya definidas en el entorno
+# El .env MANDA sobre las variables ya definidas en el entorno del sistema. Antes
+# no las pisaba y una OPENAI_API_KEY vieja de Windows (sin crédito) tapaba la
+# clave vigente del .env, causando errores 429 "no credits remaining".
+load_dotenv(override=True)
 
 # Directorio raíz del proyecto (un nivel arriba de este archivo)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -34,6 +37,15 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # gpt-4o: mejor comprensión visual de documentos escaneados con escritura manuscrita.
 OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
 IA_HABILITADO  = os.getenv("IA_HABILITADO", "false").lower() == "true"
+
+# Modelos del estudio de mercado (carpeta 04).
+#   OPENAI_MODEL_PRINCIPAL : visión que valida capturas y lee precios.
+#   OPENAI_MODEL_WEBSEARCH : modelo que ejecuta web_search_preview (búsqueda de URLs).
+# Si el modelo configurado no existe / no soporta la herramienta, el flujo cae
+# automáticamente a OPENAI_MODEL_RESPALDO (ver cotizacion_web._con_respaldo).
+OPENAI_MODEL_PRINCIPAL = os.getenv("OPENAI_MODEL_PRINCIPAL", "gpt-5.6-luna")
+OPENAI_MODEL_WEBSEARCH = os.getenv("OPENAI_MODEL_WEBSEARCH", OPENAI_MODEL_PRINCIPAL)
+OPENAI_MODEL_RESPALDO  = os.getenv("OPENAI_MODEL_RESPALDO",  "gpt-4o")
 
 # ── Búsqueda web adicional (estudio de mercado carpeta 04) ────────────────────
 # SerpAPI: búsqueda Google Shopping + orgánico para Colombia.

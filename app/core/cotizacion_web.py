@@ -27,15 +27,72 @@ _RE_HOJA_INVALIDOS = re.compile(r'[\\/?*\[\]:]')
 
 logger = logging.getLogger(__name__)
 
-# Modelos diferenciados por tarea:
-#  - BÚSQUEDA: gpt-4o devuelve URLs reales de tiendas mucho mejor que mini.
-#  - ANÁLISIS (visión): mini es suficiente y mucho más barato para validar capturas.
-#  - TÉRMINOS: tarea simple de texto, mini es suficiente.
-_MODELO_BUSQUEDA = "gpt-4o"
-# ANÁLISIS (visión): gpt-4o (no mini) — distingue mucho mejor el precio tachado/original
-# del precio con descuento, que es una discriminación visual sutil (tamaño, línea encima).
-_MODELO_ANALISIS = "gpt-4o"
+# Modelos por tarea (se configuran en .env, ver app/config.py):
+#  - BÚSQUEDA (web_search_preview): OPENAI_MODEL_WEBSEARCH  (por defecto gpt-5.6-luna)
+#  - ANÁLISIS (visión de capturas): OPENAI_MODEL_PRINCIPAL  (por defecto gpt-5.6-luna)
+#    La visión debe distinguir precio tachado/original del de oferta (discriminación sutil).
+#  - TÉRMINOS: tarea trivial de texto → se mantiene el modelo barato.
+# Si el modelo configurado no existe o no soporta la herramienta/imágenes, se cae
+# automáticamente a OPENAI_MODEL_RESPALDO (ver _con_respaldo).
+from app.config import (
+    OPENAI_MODEL_PRINCIPAL,
+    OPENAI_MODEL_RESPALDO,
+    OPENAI_MODEL_WEBSEARCH,
+)
+
+_MODELO_BUSQUEDA = OPENAI_MODEL_WEBSEARCH
+_MODELO_ANALISIS = OPENAI_MODEL_PRINCIPAL
 _MODELO_TERMINOS = "gpt-4o-mini"
+_MODELO_RESPALDO = OPENAI_MODEL_RESPALDO
+
+# Modelos que ya fallaron por "no existe / no soportado" en esta corrida: no se
+# reintentan (se usa directamente el respaldo) para no duplicar llamadas fallidas.
+_MODELOS_NO_DISPONIBLES: set[str] = set()
+
+
+def _es_error_cuota(exc: Exception) -> bool:
+    """True si el error es falta de crédito/cuota de la cuenta OpenAI (no un rate-limit)."""
+    s = str(exc).lower()
+    return any(k in s for k in (
+        "insufficient_quota", "credit_balance_exhausted", "no credits remaining",
+        "exceeded your current quota",
+    ))
+
+
+def _es_error_modelo(exc: Exception) -> bool:
+    """True si el error indica que el modelo no existe o no soporta lo solicitado."""
+    s = str(exc).lower()
+    return any(k in s for k in (
+        "model_not_found", "does not exist", "invalid model", "unknown model",
+        "unsupported_value", "unsupported parameter", "is not supported",
+        "does not have access", "not have access to model",
+    ))
+
+
+def _con_respaldo(llamar, modelo: str):
+    """
+    Ejecuta llamar(modelo). Si falla porque el modelo no existe / no soporta el
+    parámetro o la herramienta, reintenta UNA vez con el modelo de respaldo y lo
+    recuerda para el resto de la corrida. Los errores de cuota NO se reintentan
+    (el respaldo fallaría igual) y se propagan al llamador.
+    """
+    if modelo in _MODELOS_NO_DISPONIBLES and _MODELO_RESPALDO != modelo:
+        modelo = _MODELO_RESPALDO
+    try:
+        return llamar(modelo)
+    except Exception as exc:
+        if (
+            modelo != _MODELO_RESPALDO
+            and not _es_error_cuota(exc)
+            and _es_error_modelo(exc)
+        ):
+            logger.warning(
+                "  Modelo '%s' no utilizable (%s) — usando respaldo '%s'.",
+                modelo, str(exc)[:120], _MODELO_RESPALDO,
+            )
+            _MODELOS_NO_DISPONIBLES.add(modelo)
+            return llamar(_MODELO_RESPALDO)
+        raise
 
 # Pool inicial de URLs por producto — cuanto mayor, más probabilidad de 3 válidos.
 _URLS_INICIALES = 20
@@ -432,6 +489,9 @@ class ResultadoScreenshot(NamedTuple):
     precio_texto:  str | None
     precio_numero: int | None
     sin_stock:     bool = False
+    # True: la captura existe pero la visión IA no pudo verificarla (sin crédito/
+    # error de API). Se muestra en el Excel para que el revisor la valide a mano.
+    sin_verificar: bool = False
 
 
 class ProductoLinks(NamedTuple):
@@ -487,13 +547,33 @@ _RE_QUERY_BUSQUEDA = re.compile(
     r'(?:(?:^|&)(?:q|query|s|search|buscar|keyword)=)',
     re.IGNORECASE,
 )
+# Listados de tiendas grandes con segmento corto: Alkosto/Ktronix '/<slug>/c/<slug>',
+# Homecenter '/homecenter-co/k/<slug>', Jumbo/Puntos Colombia '/t/<slug>'.
+_RE_RUTA_LISTADO_CORTA = re.compile(r'(?:^|/)(?:c|k|t)/[^/]+/?$', re.IGNORECASE)
+# Forma típica de ficha de producto: '/p/', '/product(o)(s)/', id numérico largo.
+_RE_RUTA_FICHA = re.compile(
+    r'/(?:p|dp|item|product|producto|productos|products)(?:/|$)|[-_/]\d{5,}',
+    re.IGNORECASE,
+)
 
 
 def _url_es_categoria(url: str) -> bool:
     """Retorna True si la URL es de categoría, listado o búsqueda (no ficha de producto)."""
     try:
         p = urlparse(url)
-        return bool(_RE_RUTA_CATEGORIA.search(p.path) or _RE_QUERY_BUSQUEDA.search(p.query))
+        return bool(
+            _RE_RUTA_CATEGORIA.search(p.path)
+            or _RE_RUTA_LISTADO_CORTA.search(p.path)
+            or _RE_QUERY_BUSQUEDA.search(p.query)
+        )
+    except Exception:
+        return False
+
+
+def _url_parece_ficha(url: str) -> bool:
+    """Heurística barata: True si la ruta tiene forma de ficha de producto."""
+    try:
+        return bool(_RE_RUTA_FICHA.search(urlparse(url).path)) and not _url_es_categoria(url)
     except Exception:
         return False
 
@@ -764,15 +844,25 @@ def _llamar_openai_web_search(
     Reutilizable para las dos queries distintas por producto.
     """
     try:
-        response = client.responses.create(
-            model=_MODELO_BUSQUEDA,
-            tools=[{"type": "web_search_preview"}],
-            tool_choice={"type": "web_search_preview"},
-            input=[{"role": "user", "content": prompt}],
+        response = _con_respaldo(
+            lambda m: client.responses.create(
+                model=m,
+                tools=[{"type": "web_search_preview"}],
+                tool_choice={"type": "web_search_preview"},
+                input=[{"role": "user", "content": prompt}],
+            ),
+            _MODELO_BUSQUEDA,
         )
         text = response.output_text
     except Exception as exc:
-        logger.warning("  OpenAI web_search (%s) '%s': %s", query_label, item_label[:40], exc)
+        if _es_error_cuota(exc):
+            logger.error(
+                "  OpenAI web_search (%s) '%s': SIN CRÉDITO en la cuenta OpenAI — "
+                "recargar en platform.openai.com/settings/organization/billing",
+                query_label, item_label[:40],
+            )
+        else:
+            logger.warning("  OpenAI web_search (%s) '%s': %s", query_label, item_label[:40], exc)
         return []
 
     data = _extraer_json(text)
@@ -1314,8 +1404,32 @@ def _verificar_con_vision(
     salida: list[dict] = []
     for inicio in range(0, len(capturas), _VISION_BATCH):
         lote = capturas[inicio:inicio + _VISION_BATCH]
-        salida.extend(_verificar_vision_lote(descripcion, lote, client))
+        if _VISION_ESTADO["sin_credito"]:
+            # Cuenta sin crédito: no insistir (cada llamada fallaría igual).
+            salida.extend(_vision_no_disponible(lote, "cuenta OpenAI sin crédito"))
+        else:
+            salida.extend(_verificar_vision_lote(descripcion, lote, client))
     return salida
+
+
+# Estado de la visión durante UNA corrida de tomar_screenshots. Cuando la cuenta
+# OpenAI se queda sin crédito se corta de inmediato (no se gastan rondas ni llamadas).
+_VISION_ESTADO = {"sin_credito": False}
+
+
+def _vision_no_disponible(capturas: list[tuple[str, str]], motivo: str) -> list[dict]:
+    """
+    Resultado para capturas que NO pudieron verificarse por un fallo de la visión
+    (sin crédito, error de API, respuesta ilegible). La captura SÍ existe: el
+    llamador la conserva como 'sin verificar' para revisión manual en vez de
+    descartarla.
+    """
+    return [
+        {"url": url, "valido": False, "precio_texto": None, "precio_numero": None,
+         "en_stock": True, "motivo": f"verificación de visión no disponible ({motivo})",
+         "vision_no_disponible": True}
+        for url, _ in capturas
+    ]
 
 
 def _verificar_vision_lote(
@@ -1415,10 +1529,16 @@ sin texto adicional. Ejemplo para 2 imágenes:
         })
 
     try:
-        resp = client.chat.completions.create(
-            model=_MODELO_ANALISIS,
-            messages=[{"role": "user", "content": content}],
-            max_tokens=2000,
+        # max_completion_tokens: los modelos gpt-5.x rechazan 'max_tokens'; gpt-4o
+        # acepta ambos. Margen amplio porque un modelo con razonamiento consume
+        # parte del presupuesto antes de emitir el JSON.
+        resp = _con_respaldo(
+            lambda m: client.chat.completions.create(
+                model=m,
+                messages=[{"role": "user", "content": content}],
+                max_completion_tokens=4000,
+            ),
+            _MODELO_ANALISIS,
         )
         texto = resp.choices[0].message.content or ""
         logger.debug("Vision respuesta: %s", texto[:500])
@@ -1487,15 +1607,23 @@ sin texto adicional. Ejemplo para 2 imágenes:
             "Vision: array de longitud inesperada (esperado %d). Respuesta: %s",
             n, texto[:200],
         )
+        motivo = "respuesta ilegible"
     except Exception as exc:
-        logger.error("Vision API error: %s", exc)
+        if _es_error_cuota(exc):
+            _VISION_ESTADO["sin_credito"] = True
+            logger.error(
+                "Vision: la cuenta OpenAI NO tiene crédito (insufficient_quota). "
+                "Las capturas se conservan SIN VERIFICAR para revisión manual. "
+                "Recargar en https://platform.openai.com/settings/organization/billing"
+            )
+            motivo = "cuenta OpenAI sin crédito"
+        else:
+            logger.error("Vision API error: %s", exc)
+            motivo = "error de API"
 
-    # Fallback conservador: marcar inválidos (no inflar el Excel con capturas dudosas)
-    return [
-        {"url": url, "valido": False, "precio_texto": None, "precio_numero": None,
-         "en_stock": True, "motivo": "verificación de visión no disponible"}
-        for url, _ in capturas
-    ]
+    # La visión no pudo verificar: NO se descartan las capturas (existen en disco);
+    # el llamador las conserva marcadas como 'sin verificar'.
+    return _vision_no_disponible(capturas, motivo)
 
 
 # ── PASO 2d — Búsqueda de URLs adicionales ───────────────────────────────────
@@ -1566,18 +1694,24 @@ def _buscar_links_reemplazo(
                 f"\nResponde SOLO con JSON (pueden ser menos de {n} si no encuentras más):\n"
                 f'{{"links":[{{"url":"https://...","precio":"$ ...","precio_numero":null}}]}}'
             )
-            response = client.responses.create(
-                model=_MODELO_BUSQUEDA,
-                tools=[{"type": "web_search_preview"}],
-                tool_choice={"type": "web_search_preview"},
-                input=[{"role": "user", "content": prompt}],
+            response = _con_respaldo(
+                lambda m: client.responses.create(
+                    model=m,
+                    tools=[{"type": "web_search_preview"}],
+                    tool_choice={"type": "web_search_preview"},
+                    input=[{"role": "user", "content": prompt}],
+                ),
+                _MODELO_BUSQUEDA,
             )
             data = _extraer_json(response.output_text)
             if data and isinstance(data, dict):
                 for lk in (data.get("links") or [])[:n]:
                     _agregar(str(lk.get("url", "")).strip())
         except Exception as exc:
-            logger.warning("  Reemplazo OpenAI error: %s", exc)
+            if _es_error_cuota(exc):
+                logger.error("  Reemplazo OpenAI: SIN CRÉDITO en la cuenta OpenAI.")
+            else:
+                logger.warning("  Reemplazo OpenAI error: %s", exc)
 
     # ── Fuente B0: SerpAPI Google Shopping (productos nuevos con precio) ───
     for lk in _buscar_productos_serpapi_shopping(descripcion, n=n, geo_nota=geo_serp):
@@ -1626,6 +1760,9 @@ def tomar_screenshots(
     res: dict[str, ResultadoScreenshot]  = {}
     productos_actualizados: list[ProductoLinks] = []
 
+    # Nueva corrida: si se recargó el crédito, la visión vuelve a intentarse.
+    _VISION_ESTADO["sin_credito"] = False
+
     try:
         for producto in productos:
             desc            = producto.descripcion or producto.item
@@ -1648,6 +1785,10 @@ def tomar_screenshots(
             #  - validos_agotado: válido pero agotado → solo como RESERVA si no hay 3 en stock.
             validos_stock:   list[LinkProducto] = []
             validos_agotado: list[LinkProducto] = []
+            # Capturas tomadas pero NO verificables por la visión (sin crédito/API):
+            # se conservan para que el revisor las valide a mano.
+            sin_verificar:   list[LinkProducto] = []
+            claves_sin_verificar: set[str] = set()
             rondas_ok = 0
 
             # Precio previo conocido por URL (de SerpAPI Shopping: old_price/price).
@@ -1687,6 +1828,27 @@ def tomar_screenshots(
                 # ── c. Clasificar válidos / inválidos ─────────────────────
                 for url, (ruta, _b64, _p_txt, _p_num) in datos_ronda.items():
                     verif = verif_por_url.get(url)
+
+                    # La visión no pudo analizar esta captura (sin crédito / error de
+                    # API): NO se descarta. Se conserva sin verificar para revisión manual.
+                    if verif and verif.get("vision_no_disponible"):
+                        clave_sv = _canonizar_url(url)
+                        if ruta and clave_sv not in claves_sin_verificar:
+                            claves_sin_verificar.add(clave_sv)
+                            sin_verificar.append(LinkProducto(
+                                url=url, precio_texto="Sin verificar", precio_numero=None,
+                            ))
+                            res[url] = ResultadoScreenshot(
+                                ruta=ruta, precio_texto=None, precio_numero=None,
+                                sin_stock=False, sin_verificar=True,
+                            )
+                            logger.warning(
+                                "  [%s] ? capturada SIN VERIFICAR (%s): %s",
+                                producto.item, verif.get("motivo", ""), url,
+                            )
+                        else:
+                            res[url] = ResultadoScreenshot(None, None, None, False)
+                        continue
 
                     if not verif or not verif.get("valido"):
                         res[url] = ResultadoScreenshot(None, None, None, False)
@@ -1768,6 +1930,16 @@ def tomar_screenshots(
 
                 rondas_ok += 1
 
+                # Sin crédito OpenAI: más rondas solo gastarían navegación y búsquedas
+                # que tampoco se podrían verificar. Se corta con lo capturado.
+                if _VISION_ESTADO["sin_credito"]:
+                    logger.warning(
+                        "  [%s] Visión sin crédito: se omiten rondas de reemplazo "
+                        "(%d captura(s) sin verificar conservadas).",
+                        producto.item, len(sin_verificar),
+                    )
+                    break
+
                 # ── d. ¿Tenemos suficientes EN STOCK? ─────────────────────
                 needed = _MIN_VALIDOS - len(validos_stock)
                 if needed <= 0:
@@ -1814,6 +1986,20 @@ def tomar_screenshots(
                 logger.info(
                     "  [%s] Completando con %d captura(s) de productos agotados (reserva).",
                     producto.item, len(relleno),
+                )
+
+            # Último recurso: capturas que la visión no pudo verificar. Se prefieren
+            # las URLs con forma de ficha de producto (/p/, /product/, id numérico)
+            # sobre las que parecen listados. El Excel las rotula "SIN VERIFICAR".
+            if len(final_links) < _MIN_VALIDOS and sin_verificar:
+                candidatas = sorted(
+                    sin_verificar, key=lambda lk: 0 if _url_parece_ficha(lk.url) else 1
+                )
+                faltan = _MIN_VALIDOS - len(final_links)
+                final_links.extend(candidatas[:faltan])
+                logger.warning(
+                    "  [%s] Completando con %d captura(s) SIN VERIFICAR (visión no disponible).",
+                    producto.item, min(faltan, len(candidatas)),
                 )
 
             if len(final_links) < _MIN_VALIDOS:
@@ -2103,6 +2289,10 @@ def generar_excel_cotizaciones(
                 if ss.sin_stock:
                     # Captura de reserva: producto agotado (se usó por no haber 3 en stock)
                     precio_fuente = "precio de referencia — PRODUCTO AGOTADO"
+            elif ss.sin_verificar:
+                # Captura tomada pero la visión IA no pudo analizarla (sin crédito/API).
+                precio_mostrar = "SIN VERIFICAR"
+                precio_fuente  = "verificación IA no disponible — revisar manual"
             else:
                 precio_mostrar = "No disponible"
                 precio_fuente  = "no se pudo leer de la página"

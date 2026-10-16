@@ -447,6 +447,9 @@ Copiar `.env.example` a `.env` y ajustar según el entorno:
 | `IA_HABILITADO`         | `false`                    | Activa validación semántica con IA (flujos 01/02) |
 | `OPENAI_API_KEY`        | *(vacío)*                  | API key de OpenAI. **Requerida para el flujo 04** (búsqueda web + OCR fallback) y si `IA_HABILITADO=true` |
 | `OPENAI_MODEL`          | `gpt-4o`                   | Modelo OpenAI para análisis visual de documentos (flujos 01/02) |
+| `OPENAI_MODEL_PRINCIPAL`| `gpt-5.6-luna`             | Flujo 04: modelo de visión que valida capturas y lee precios |
+| `OPENAI_MODEL_WEBSEARCH`| = `OPENAI_MODEL_PRINCIPAL` | Flujo 04: modelo que ejecuta `web_search_preview` |
+| `OPENAI_MODEL_RESPALDO` | `gpt-4o`                   | Flujo 04: modelo al que se cae si el configurado no existe / no soporta la herramienta |
 | `TIMEOUT_DESCARGA`      | `120`                      | Timeout (s) por archivo descargado de SharePoint |
 
 > Los modelos del flujo 04 están fijados en `app/core/cotizacion_web.py`: `gpt-4o` para búsqueda web y análisis visual, `gpt-4o-mini` para normalizar términos. El OCR fallback usa `gpt-4o-mini`.

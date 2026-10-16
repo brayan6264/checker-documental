@@ -1016,16 +1016,29 @@ class ValidadorDocumental:
 
                     # Regla obligatoria: 3 cotizaciones válidas por producto.
                     # Si algún producto quedó con menos, se marca completación manual.
+                    # Capturas "sin verificar" (visión IA no disponible: sin crédito/API)
+                    # NO cuentan como verificadas: requieren revisión manual.
+                    def _n_sin_verificar(p) -> int:
+                        return sum(
+                            1 for lk in p.links
+                            if (screenshots.get(lk.url) is not None
+                                and screenshots[lk.url].sin_verificar)
+                        )
+
                     incompletos = [
                         p for p in web_productos
-                        if len(p.links) < 3
+                        if (len(p.links) - _n_sin_verificar(p)) < 3
                     ]
 
                     if incompletos:
-                        detalle = "; ".join(
-                            f"{p.item} ({len(p.links)}/3)"
-                            for p in incompletos
-                        )
+                        def _fmt(p) -> str:
+                            sv = _n_sin_verificar(p)
+                            ver = len(p.links) - sv
+                            if sv:
+                                return f"{p.item} ({ver}/3, {sv} sin verificar por IA)"
+                            return f"{p.item} ({ver}/3)"
+
+                        detalle = "; ".join(_fmt(p) for p in incompletos)
 
                         web_excel_nombre = (
                             f"REQUIERE COMPLETACIÓN MANUAL — "
