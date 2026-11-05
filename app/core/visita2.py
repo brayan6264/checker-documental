@@ -7,11 +7,34 @@ del archivo, utilizando texto normalizado (sin tildes, minúsculas).
 
 from pathlib import Path
 
-from app.core.normalizacion import normalizar
+from app.core.normalizacion import coincide_nombre
 from app.core.reglas import (
     DOCS_VISITA2_ORDEN,
+    EXTENSIONES_VISITA2,
     PALABRAS_CLAVE_VISITA2,
 )
+
+
+def clasificar_archivo_visita2(nombre_archivo: str) -> str | None:
+    """
+    Retorna el documento de la visita 2 que corresponde al archivo, o None.
+
+    Cada archivo se asigna a un solo documento: el primero que coincida en
+    PALABRAS_CLAVE_VISITA2 y admita su extensión.
+    """
+    ruta = Path(nombre_archivo)
+
+    for documento, palabras in PALABRAS_CLAVE_VISITA2.items():
+        if not coincide_nombre(ruta.stem, palabras):
+            continue
+
+        extensiones = EXTENSIONES_VISITA2.get(documento)
+        if extensiones is None or ruta.suffix.lower() in extensiones:
+            return documento
+
+        return None
+
+    return None
 
 
 def validar_visita2(ruta_carpeta: str) -> dict:
@@ -44,10 +67,9 @@ def validar_visita2(ruta_carpeta: str) -> dict:
         if not archivo.is_file():
             continue
 
-        nombre = normalizar(archivo.stem)
+        documento = clasificar_archivo_visita2(archivo.name)
 
-        for documento, palabras in PALABRAS_CLAVE_VISITA2.items():
-            if any(palabra in nombre for palabra in palabras):
-                presentes[documento] = True
+        if documento is not None:
+            presentes[documento] = True
 
     return presentes
