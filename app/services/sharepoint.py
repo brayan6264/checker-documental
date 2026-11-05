@@ -442,8 +442,7 @@ def descargar_visita2_selectiva(
       stats       → estadísticas de descarga
     """
 
-    from app.core.normalizacion import normalizar as _norm
-    from app.core.visita2 import PALABRAS_CLAVE_VISITA2
+    from app.core.visita2 import PALABRAS_CLAVE_VISITA2, clasificar_archivo_visita2
 
     resultado = {
         "encontrada": False,
@@ -471,15 +470,14 @@ def descargar_visita2_selectiva(
 
     for srel in todos_archivos:
         nombre = srel.rstrip("/").split("/")[-1]
-        stem = _norm(Path(nombre).stem)
+        keyword = clasificar_archivo_visita2(nombre)
 
-        for keyword, palabras in PALABRAS_CLAVE_VISITA2.items():
-            if keyword not in a_descargar and any(
-                palabra in stem
-                for palabra in palabras
-            ):
-                a_descargar[keyword] = srel
-                break
+        if keyword is None:
+            logger.debug("02_VISITA: archivo sin clasificar: %s", nombre)
+        elif keyword in a_descargar:
+            logger.warning("02_VISITA: %s repetido, se ignora: %s", keyword, nombre)
+        else:
+            a_descargar[keyword] = srel
 
     if not a_descargar:
         return resultado

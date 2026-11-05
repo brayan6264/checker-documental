@@ -497,10 +497,18 @@ class ValidadorDocumental:
                         resultado_plan = analizar_plan_negocio(str(ruta_archivo))
                         if resultado_plan["completo"]:
                             plan_negocio = "OK"
+                        elif resultado_plan.get("error"):
+                            plan_negocio = "No se pudo leer el archivo"
+                            obs.append(f"Plan de Negocio ilegible: {ruta_archivo.name}")
+                            tiene_error = True
                         else:
-                            n = len(resultado_plan["faltantes"])
+                            faltantes_plan = resultado_plan["faltantes"]
+                            n = len(faltantes_plan)
                             plan_negocio = f"Faltan {n} campos"
-                            obs.append(f"Plan de Negocio incompleto ({n} campos)")
+                            obs.append(
+                                f"Plan de Negocio incompleto ({n} campos): "
+                                f"{', '.join(faltantes_plan)}"
+                            )
                             tiene_error = True
 
                 except Exception as exc:

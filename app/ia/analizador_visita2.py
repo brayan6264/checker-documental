@@ -7,6 +7,7 @@ Analizadores de documentos de la carpeta
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List
 from app.core.normalizacion import normalizar
@@ -34,102 +35,140 @@ logger = logging.getLogger(__name__)
 # PLAN DE NEGOCIO
 # ──────────────────────────────────────────────────────────────────────────────
 
-CAMPOS_CONTROL = [
-    "unidad productiva",
-    "representante",
-    "celular",
-    "actividad economica principal",
-    "necesidad o problema",
-    "principales clientes",
-    "otro tipo de clientes",
-    "fortalezas",
-    "oportunidades",
-    "debilidades",
-    "amenazas",
-    "plan de inversion",
-    "estrategias administrativas",
-    "fortalecimiento productivo",
-    "asistencia tecnica",
-    "modalidad educativa",
-    "organizacion y/o asociacion",
-    "asociacion, red o plataforma",
+# Dónde está la respuesta de cada etiqueta en el formato.
+_A_LA_DERECHA = "derecha"   # misma fila; la etiqueta ocupa hasta 2 columnas
+_DEBAJO       = "debajo"    # fila siguiente, misma columna
+_LISTA_FODA   = "lista"     # filas numeradas debajo: "1.1" + respuesta
+_TABLA        = "tabla"     # filas debajo, misma columna, hasta la sección siguiente
+
+_COLUMNAS_ETIQUETA = 2
+_FILAS_LISTA_FODA  = 4
+_FILAS_TABLA       = 8
+_RE_NUMERACION     = re.compile(r"^\d+(\.\d+)*\.?$")
+_RE_FIN_TABLA      = re.compile(r"\d+\.\s*procesos asociativos")
+_RE_INSTRUCCION    = re.compile(r"agregar las filas")
+
+# (campo, etiqueta al inicio de la celda, ubicación de la respuesta).
+# Las etiquetas se anclan al inicio para no confundirlas con respuestas de
+# texto libre que mencionan las mismas palabras. "decripcion", "amenzas" y
+# "pertence" son errores de digitación presentes en versiones reales del formato.
+CAMPOS_PLAN_NEGOCIO = [
+    ("unidad productiva",             r"nombre de la unidad productiva",             _A_LA_DERECHA),
+    ("representante",                 r"nombre del representante",                   _A_LA_DERECHA),
+    ("celular",                       r"celular",                                    _A_LA_DERECHA),
+    ("actividad economica principal", r"actividad economica principal",              _A_LA_DERECHA),
+    ("necesidad o problema",          r"necesidad o problema",                       _A_LA_DERECHA),
+    ("principales clientes",          r"des?cripcion de los principales clientes",   _A_LA_DERECHA),
+    ("otro tipo de clientes",         r"a que otro tipo de clientes",                _A_LA_DERECHA),
+    ("fortalezas",                    r"\d+\.\s*fortalezas",                         _LISTA_FODA),
+    ("oportunidades",                 r"\d+\.\s*oportunidades",                      _LISTA_FODA),
+    ("debilidades",                   r"\d+\.\s*debilidades",                        _LISTA_FODA),
+    ("amenazas",                      r"\d+\.\s*(amenazas|amenzas)",                 _LISTA_FODA),
+    ("plan de inversion",             r"objetivo del plan de (inversion|accion)",    _DEBAJO),
+    ("estrategias administrativas",   r"estrategias? administrativas?",              _A_LA_DERECHA),
+    ("fortalecimiento productivo",    r"estrategias? de fortalecimiento productivo", _A_LA_DERECHA),
+    ("asistencia tecnica",            r"temas de asistencia tecnica",                _TABLA),
+    ("modalidad educativa",           r"modalidad educativa",                        _TABLA),
+    ("organizacion y/o asociacion",   r"pert\w+ (a )?algun tipo de organizacion",    _A_LA_DERECHA),
+    ("asociacion, red o plataforma",  r"conoce alguna asociacion, red o plataforma", _A_LA_DERECHA),
 ]
 
+_RE_ETIQUETA_FODA = re.compile(r"\d+\.\s*(fortalezas|oportunidades|debilidades|amenazas|amenzas)")
 
-def buscar_valor_cercano(ws, etiqueta):
-    """
-    Busca una etiqueta y localiza una respuesta cercana.
 
-    Revisa un área alrededor de la etiqueta y evita
-    tomar otras etiquetas como respuesta.
-    """
+def _texto_celda(ws, fila: int, columna: int) -> str:
+    """Valor de la celda como texto sin espacios extremos ('' si está vacía)."""
+    valor = ws.cell(row=fila, column=columna).value
+    return "" if valor is None else str(valor).strip()
 
-    etiqueta_norm = normalizar(etiqueta)
+
+def _texto_etiqueta(valor) -> str:
+    """Normaliza una posible etiqueta: sin tildes, signos iniciales ni dobles espacios."""
+    return " ".join(normalizar(str(valor)).lstrip("¿?¡! ").split())
+
+
+def _buscar_etiqueta(ws, patron: str):
+    """Retorna la primera celda cuyo texto inicia con la etiqueta, o None."""
+    regex = re.compile(patron)
 
     for fila in ws.iter_rows():
-
         for celda in fila:
-
-            if celda.value is None:
-                continue
-
-            texto = normalizar(str(celda.value))
-
-            if etiqueta_norm not in texto:
-                continue
-
-            fila_idx = celda.row
-            col_idx = celda.column
-
-            candidatos = []
-
-            # Buscar en una ventana cercana
-            for r in range(fila_idx, fila_idx + 6):
-
-                for c in range(col_idx + 1, col_idx + 6):
-
-                    valor = ws.cell(
-                        row=r,
-                        column=c,
-                    ).value
-
-                    if valor is None:
-                        continue
-
-                    if isinstance(valor, str):
-
-                        valor = valor.strip()
-
-                        if not valor:
-                            continue
-
-                    candidatos.append(str(valor))
-
-            # Filtrar etiquetas conocidas
-            for candidato in candidatos:
-
-                candidato_norm = normalizar(candidato)
-
-                es_etiqueta = any(
-                    normalizar(campo) in candidato_norm
-                    for campo in CAMPOS_CONTROL
-                )
-
-                if es_etiqueta:
-                    continue
-
-                return candidato
-
-            return None
+            if celda.value is not None and regex.match(_texto_etiqueta(celda.value)):
+                return celda
 
     return None
+
+
+def _lista_foda_tiene_respuesta(ws, fila: int, columna: int) -> bool:
+    """True si alguna fila numerada bajo el título del FODA tiene respuesta."""
+    for r in range(fila + 1, fila + 1 + _FILAS_LISTA_FODA):
+        if _RE_ETIQUETA_FODA.match(_texto_etiqueta(_texto_celda(ws, r, columna))):
+            return False
+
+        for c in (columna, columna + 1):
+            texto = _texto_celda(ws, r, c)
+            if texto and not _RE_NUMERACION.match(texto):
+                return True
+
+    return False
+
+
+def _tabla_tiene_respuesta(ws, fila: int, columna: int) -> bool:
+    """True si la columna tiene una respuesta real antes de la sección siguiente."""
+    for r in range(fila + 1, fila + 1 + _FILAS_TABLA):
+        if any(
+            _RE_FIN_TABLA.match(_texto_etiqueta(_texto_celda(ws, r, c)))
+            for c in range(1, columna + 1)
+        ):
+            return False
+
+        texto = _texto_etiqueta(_texto_celda(ws, r, columna))
+        if texto and not _RE_INSTRUCCION.match(texto):
+            return True
+
+    return False
+
+
+def campo_diligenciado(ws, patron: str, ubicacion: str) -> bool:
+    """True si la etiqueta existe en la hoja y su propia respuesta tiene contenido."""
+    celda = _buscar_etiqueta(ws, patron)
+
+    if celda is None:
+        return False
+
+    if ubicacion == _LISTA_FODA:
+        return _lista_foda_tiene_respuesta(ws, celda.row, celda.column)
+
+    if ubicacion == _TABLA:
+        return _tabla_tiene_respuesta(ws, celda.row, celda.column)
+
+    if ubicacion == _DEBAJO:
+        return bool(_texto_celda(ws, celda.row + 1, celda.column))
+
+    return any(
+        _texto_celda(ws, celda.row, celda.column + desplazamiento)
+        for desplazamiento in range(1, _COLUMNAS_ETIQUETA + 1)
+    )
+
+
+def _hoja_plan_negocio(wb):
+    """Retorna la hoja con más etiquetas del formato (no siempre es la primera)."""
+    return max(
+        wb.worksheets,
+        key=lambda ws: sum(
+            _buscar_etiqueta(ws, patron) is not None
+            for _, patron, _ in CAMPOS_PLAN_NEGOCIO
+        ),
+    )
+
 
 def analizar_plan_negocio(ruta_excel: str) -> Dict[str, object]:
     """
     Valida que los campos mínimos del plan de negocio estén diligenciados.
-    """
 
-    faltantes: List[str] = []
+    Si el archivo no se puede abrir retorna "error" con el motivo; en ese caso
+    "faltantes" queda vacío porque el contenido no fue revisado.
+    """
 
     try:
         wb = openpyxl.load_workbook(
@@ -137,30 +176,13 @@ def analizar_plan_negocio(ruta_excel: str) -> Dict[str, object]:
             data_only=True,
         )
 
-        ws = wb.worksheets[0]
+        ws = _hoja_plan_negocio(wb)
 
-        for etiqueta in CAMPOS_CONTROL:
-
-            valor = buscar_valor_cercano(
-                ws,
-                etiqueta,
-            )
-
-            if valor is None:
-
-                print(
-                    f"NO ENCONTRADO -> {etiqueta}"
-                )
-
-                faltantes.append(
-                    etiqueta
-                )
-
-            else:
-
-                print(
-                    f"{etiqueta} -> {valor}"
-                )
+        faltantes: List[str] = [
+            campo
+            for campo, patron, ubicacion in CAMPOS_PLAN_NEGOCIO
+            if not campo_diligenciado(ws, patron, ubicacion)
+        ]
 
         wb.close()
 
@@ -170,9 +192,12 @@ def analizar_plan_negocio(ruta_excel: str) -> Dict[str, object]:
         }
 
     except Exception as exc:
+        logger.warning("Plan de negocio ilegible '%s': %s", ruta_excel, exc)
+
         return {
             "completo": False,
-            "faltantes": [f"Error al leer archivo: {exc}"],
+            "faltantes": [],
+            "error": str(exc),
         }
 
 

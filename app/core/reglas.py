@@ -89,10 +89,18 @@ DOCS_VISITA_ORDEN = ["ACTA_COMPROMISO", "ACTA_VISITA_1", "TRATAMIENTO_DATOS"]
 
 # ── Carpeta 02_VISITA_2_DIAGNOSTICO ──────────────────────────────────────────
 
+# Se comparan con coincide_nombre(): espacios, "_" y "-" son equivalentes.
+# El orden importa: cada archivo se asigna al primer documento que coincida.
 PALABRAS_CLAVE_VISITA2: dict[str, list[str]] = {
     "DIAGNOSTICO":  ["diag"],
-    "PLAN_NEGOCIO": ["plan de negocio"],
-    "ACTA_VISITA_2": ["vis"],
+    "PLAN_NEGOCIO": ["plan de negocio", "plan negocio"],
+    "ACTA_VISITA_2": ["visita"],
+}
+
+# Extensiones admitidas por documento (sin entrada = cualquier extensión).
+# El plan de negocio se analiza con openpyxl, que solo lee estos formatos.
+EXTENSIONES_VISITA2: dict[str, set[str]] = {
+    "PLAN_NEGOCIO": {".xlsx", ".xlsm"},
 }
 
 DOCS_VISITA2_ORDEN = [
